@@ -219,8 +219,6 @@ src/
 
 Domain and engine logic remain independent of Windows APIs, SQLite, and Ratatui where practical. This allows most reconstruction tests to run on macOS while the Windows collector is built and tested on Windows.
 
-flogging's own source uses safe Rust. This is a project convention rather than a crate-level `forbid(unsafe_code)` attribute. Dependencies may encapsulate platform-specific unsafe code behind safe interfaces.
-
 ## 8. MVP completion criteria
 
 The MVP is complete when all four parts satisfy the following criteria.

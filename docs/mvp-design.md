@@ -212,7 +212,7 @@ src/
     git/
   storage/
   engine/
-  ui/tui/
+  ui/
 ```
 
 `main.rs` is the composition root: it creates the store, collectors, engine, and TUI and connects their lifecycles.

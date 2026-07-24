@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6,7 +7,7 @@ pub struct Event {
     pub payload: EventPayload,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventPayload {
     ForegroundWindowObserved {
         window_id: u64,

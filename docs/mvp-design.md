@@ -56,7 +56,7 @@ Each collector:
 - records only meaningful changes rather than continuously recording unchanged state;
 - reports failures without terminating the other collectors;
 - uses the same event envelope and storage interface;
-- records timestamps for when an event occurred and when it was observed.
+- records when each event was observed.
 
 Collectors write through `EventStore` methods. They do not execute SQL directly. There is no global event queue or dedicated database-writer process in the MVP. The store is responsible for safe, short SQLite operations when collectors write concurrently.
 
@@ -115,16 +115,14 @@ Every event has a common envelope:
 
 ```text
 Event
-  id                  local monotonically increasing identifier
-  observed_at_utc     time flogging observed or imported the fact
-  source              windows | git | application
-  kind                versioned event kind
-  schema_version      payload schema version
-  payload             source-specific data
+  observed_at         time flogging observed the fact
+  payload             event-specific data
 ```
 
-When a source provides another meaningful timestamp, it belongs to that event's
-payload. For example, a Git commit payload records its commit timestamp.
+SQLite assigns each stored event a local, monotonically increasing `id`.
+`observed_at` is stored as UTC Unix milliseconds. When a source provides another
+meaningful timestamp, it belongs to that event's payload. For example, a Git
+commit payload records its commit timestamp.
 
 The database lives below:
 
@@ -132,7 +130,11 @@ The database lives below:
 %LOCALAPPDATA%\flogging\
 ```
 
-SQLite uses WAL mode, a busy timeout, and short transactions. Times are stored in UTC and converted to the user's local timezone when constructing or displaying a calendar.
+For the MVP, the engine converts stored timestamps using the computer's current
+system timezone when it constructs a calendar. This is optimized for building
+today's calendar. If the system timezone later changes, a historical calendar
+may display its events in the new timezone; this tradeoff is accepted for the
+MVP.
 
 Calendar blocks are not persisted in the MVP. They are derived views of the raw events.
 

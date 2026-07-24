@@ -116,13 +116,15 @@ Every event has a common envelope:
 ```text
 Event
   id                  local monotonically increasing identifier
-  occurred_at_utc     time of the underlying fact
-  observed_at_utc     time flogging recorded or imported it
+  observed_at_utc     time flogging observed or imported the fact
   source              windows | git | application
   kind                versioned event kind
   schema_version      payload schema version
   payload             source-specific data
 ```
+
+When a source provides another meaningful timestamp, it belongs to that event's
+payload. For example, a Git commit payload records its commit timestamp.
 
 The database lives below:
 

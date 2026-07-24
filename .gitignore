@@ -1,4 +1,18 @@
+# Build artifacts
+/dist/
+/target/
+
+# OS artifacts
 .DS_Store
-/idea
-/vscode
-/target
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.local
+
+# Database
+db.sqlite

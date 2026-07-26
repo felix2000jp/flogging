@@ -39,10 +39,10 @@ impl WindowsCollector {
 
 fn poll_and_store_foreground_window_events(store: EventStore, stop_receiver: Receiver<()>) {
     loop {
-        if let Some(event) = collect_foreground_window_event() {
-            if let Err(error) = store.save(&event) {
-                eprintln!("Could not save foreground-window event: {error:#}");
-            }
+        if let Some(event) = collect_foreground_window_event()
+            && let Err(error) = store.save(&event)
+        {
+            eprintln!("Could not save foreground-window event: {error:#}");
         }
 
         match stop_receiver.recv_timeout(Duration::from_secs(1)) {

@@ -15,4 +15,4 @@ Thumbs.db
 .env.local
 
 # Database
-db.sqlite
+flogging.db

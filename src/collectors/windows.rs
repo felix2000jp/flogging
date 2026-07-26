@@ -1,11 +1,58 @@
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::time::SystemTime;
 
-use crate::domain::{Event, EventPayload};
+use anyhow::{Result, anyhow};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
 };
 
-pub fn collect_foreground_window_event() -> Option<Event> {
+use crate::domain::{Event, EventPayload};
+use crate::storage::EventStore;
+
+pub struct WindowsCollector {
+    stop_sender: Sender<()>,
+    worker: JoinHandle<()>,
+}
+
+impl WindowsCollector {
+    pub fn start(store: EventStore) -> Self {
+        let (stop_sender, stop_receiver) = mpsc::channel();
+        let worker =
+            thread::spawn(move || poll_and_store_foreground_window_events(store, stop_receiver));
+
+        Self {
+            stop_sender,
+            worker,
+        }
+    }
+
+    pub fn shutdown(self) -> Result<()> {
+        let _ = self.stop_sender.send(());
+
+        self.worker
+            .join()
+            .map_err(|_| anyhow!("Windows collector thread panicked"))
+    }
+}
+
+fn poll_and_store_foreground_window_events(store: EventStore, stop_receiver: Receiver<()>) {
+    loop {
+        if let Some(event) = collect_foreground_window_event() {
+            if let Err(error) = store.save(&event) {
+                eprintln!("Could not save foreground-window event: {error:#}");
+            }
+        }
+
+        match stop_receiver.recv_timeout(Duration::from_secs(1)) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+fn collect_foreground_window_event() -> Option<Event> {
     let observed_at = SystemTime::now();
 
     // SAFETY: GetForegroundWindow takes no arguments and returns a borrowed

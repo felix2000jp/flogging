@@ -97,9 +97,8 @@ fn collect_foreground_window_event() -> Option<Event> {
         None
     };
 
-    if executable.is_none() || title.is_none() {
-        return None;
-    }
+    let executable = executable?;
+    let title = title?;
 
     Some(Event {
         observed_at,

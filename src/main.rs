@@ -36,8 +36,6 @@ fn main() -> anyhow::Result<()> {
                 executable_path,
                 title,
             } => {
-                let title = title.as_deref().unwrap_or("<title unavailable>");
-                let executable = executable.as_deref().unwrap_or("<executable unavailable>");
                 let executable_path = executable_path
                     .as_deref()
                     .map(|path| path.display().to_string())

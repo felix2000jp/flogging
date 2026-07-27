@@ -1,3 +1,5 @@
+mod queries;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,30 +29,18 @@ impl EventStore {
     }
 
     pub fn all_events(&self) -> Result<Vec<Event>> {
-        let mut statement = self.connection.prepare(
-            "
-            SELECT
-                events.observed_at,
-                foreground_window_events.window_id,
-                foreground_window_events.executable,
-                foreground_window_events.executable_path,
-                foreground_window_events.title
-            FROM events
-            JOIN foreground_window_events
-                ON foreground_window_events.event_id = events.id
-            WHERE events.event_type = ?1
-            ORDER BY events.observed_at, events.id
-            ",
-        )?;
+        let mut statement = self
+            .connection
+            .prepare(queries::foreground_window_events::SELECT_ALL)?;
 
         let stored_events = statement
             .query_map([FOREGROUND_WINDOW_EVENT_TYPE], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -80,31 +70,7 @@ impl EventStore {
 }
 
 fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY,
-            observed_at INTEGER NOT NULL,
-            event_type TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS foreground_window_events (
-            event_id INTEGER PRIMARY KEY,
-            window_id INTEGER NOT NULL,
-            executable TEXT,
-            executable_path TEXT,
-            title TEXT,
-            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS events_observed_at
-            ON events(observed_at);
-
-        CREATE INDEX IF NOT EXISTS foreground_window_events_executable
-            ON foreground_window_events(executable);
-        ",
-    )?;
-
+    connection.execute_batch(queries::SCHEMA)?;
     Ok(())
 }
 
@@ -112,7 +78,7 @@ fn insert_event(connection: &Connection, event: &Event) -> Result<()> {
     let observed_at = unix_milliseconds(event.observed_at)?;
 
     connection.execute(
-        "INSERT INTO events (observed_at, event_type) VALUES (?1, ?2)",
+        queries::events::INSERT,
         params![observed_at, FOREGROUND_WINDOW_EVENT_TYPE],
     )?;
 
@@ -131,16 +97,7 @@ fn insert_event(connection: &Connection, event: &Event) -> Result<()> {
                 .map(|path| path.to_string_lossy());
 
             connection.execute(
-                "
-                INSERT INTO foreground_window_events (
-                    event_id,
-                    window_id,
-                    executable,
-                    executable_path,
-                    title
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5)
-                ",
+                queries::foreground_window_events::INSERT,
                 params![event_id, window_id, executable, executable_path, title],
             )?;
         }
@@ -178,9 +135,9 @@ mod tests {
             observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
             payload: EventPayload::ForegroundWindowObserved {
                 window_id: 123,
-                executable: Some("idea64.exe".to_owned()),
+                executable: "idea64.exe".to_owned(),
                 executable_path: Some(PathBuf::from(r"C:\Program Files\JetBrains\idea64.exe")),
-                title: Some("IntelliJ IDEA".to_owned()),
+                title: "IntelliJ IDEA".to_owned(),
             },
         };
 
@@ -190,27 +147,9 @@ mod tests {
     }
 
     #[test]
-    fn stores_observed_at_as_unix_milliseconds() {
-        let mut store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
-        let event = Event {
-            observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
-            payload: EventPayload::ForegroundWindowObserved {
-                window_id: 123,
-                executable: None,
-                executable_path: None,
-                title: None,
-            },
-        };
+    fn converts_observed_at_to_unix_milliseconds() {
+        let observed_at = UNIX_EPOCH + Duration::from_millis(42_123);
 
-        store.save(&event).unwrap();
-
-        let observed_at = store
-            .connection
-            .query_row("SELECT observed_at FROM events", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap();
-
-        assert_eq!(observed_at, 42_123);
+        assert_eq!(unix_milliseconds(observed_at).unwrap(), 42_123);
     }
 }

@@ -11,8 +11,8 @@ pub struct Event {
 pub enum EventPayload {
     ForegroundWindowObserved {
         window_id: u64,
-        executable: Option<String>,
+        title: String,
+        executable: String,
         executable_path: Option<PathBuf>,
-        title: Option<String>,
     },
 }

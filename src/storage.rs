@@ -83,6 +83,7 @@ fn system_time(unix_milliseconds: i64) -> Result<SystemTime> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
 
     use crate::domain::EventPayload;
@@ -96,6 +97,8 @@ mod tests {
             observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
             payload: EventPayload::ForegroundWindowObserved {
                 window_id: 123,
+                executable: Some("idea64.exe".to_owned()),
+                executable_path: Some(PathBuf::from(r"C:\Program Files\JetBrains\idea64.exe")),
                 title: Some("IntelliJ IDEA".to_owned()),
             },
         };
@@ -112,6 +115,8 @@ mod tests {
             observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
             payload: EventPayload::ForegroundWindowObserved {
                 window_id: 123,
+                executable: None,
+                executable_path: None,
                 title: None,
             },
         };
@@ -126,5 +131,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(observed_at, 42_123);
+    }
+
+    #[test]
+    fn reads_events_stored_before_executable_was_added() {
+        let store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO events (observed_at, payload) VALUES (?1, ?2)",
+                params![
+                    42_123,
+                    r#"{"ForegroundWindowObserved":{"window_id":123,"title":"IntelliJ IDEA"}}"#
+                ],
+            )
+            .unwrap();
+
+        let events = store.all_events().unwrap();
+
+        assert_eq!(
+            events,
+            vec![Event {
+                observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
+                payload: EventPayload::ForegroundWindowObserved {
+                    window_id: 123,
+                    executable: None,
+                    executable_path: None,
+                    title: Some("IntelliJ IDEA".to_owned()),
+                },
+            }]
+        );
     }
 }

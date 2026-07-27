@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,6 +12,8 @@ pub struct Event {
 pub enum EventPayload {
     ForegroundWindowObserved {
         window_id: u64,
+        executable: Option<String>,
+        executable_path: Option<PathBuf>,
         title: Option<String>,
     },
 }

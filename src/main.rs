@@ -30,9 +30,23 @@ fn main() -> anyhow::Result<()> {
         let observed_at = event.observed_at.duration_since(UNIX_EPOCH)?.as_millis();
 
         match &event.payload {
-            EventPayload::ForegroundWindowObserved { window_id, title } => {
+            EventPayload::ForegroundWindowObserved {
+                window_id,
+                executable,
+                executable_path,
+                title,
+            } => {
                 let title = title.as_deref().unwrap_or("<title unavailable>");
-                println!("{observed_at} | window {window_id} | {title}");
+                let executable = executable.as_deref().unwrap_or("<executable unavailable>");
+                let executable_path = executable_path
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<executable path unavailable>".to_owned());
+
+                println!(
+                    "{observed_at} | window {window_id} | {title} | \
+                     {executable} | {executable_path}"
+                );
             }
         }
     }

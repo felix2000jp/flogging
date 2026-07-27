@@ -97,6 +97,10 @@ fn collect_foreground_window_event() -> Option<Event> {
         None
     };
 
+    if executable.is_none() || title.is_none() {
+        return None;
+    }
+
     Some(Event {
         observed_at,
         payload: EventPayload::ForegroundWindowObserved {

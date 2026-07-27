@@ -1,10 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
 use crate::domain::{Event, EventPayload};
+
+const FOREGROUND_WINDOW_EVENT_TYPE: &str = "foreground_window_observed";
 
 pub struct EventStore {
     connection: Connection,
@@ -16,36 +18,53 @@ impl EventStore {
         Self::initialize(connection)
     }
 
-    pub fn save(&self, event: &Event) -> Result<()> {
-        let observed_at = unix_milliseconds(event.observed_at)?;
-        let payload = serde_json::to_string(&event.payload)?;
-
-        self.connection.execute(
-            "INSERT INTO events (observed_at, payload) VALUES (?1, ?2)",
-            params![observed_at, payload],
-        )?;
+    pub fn save(&mut self, event: &Event) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        insert_event(&transaction, event)?;
+        transaction.commit()?;
 
         Ok(())
     }
 
     pub fn all_events(&self) -> Result<Vec<Event>> {
         let mut statement = self.connection.prepare(
-            "SELECT observed_at, payload
-             FROM events
-             ORDER BY observed_at, id",
+            "
+            SELECT
+                events.observed_at,
+                foreground_window_events.window_id,
+                foreground_window_events.executable,
+                foreground_window_events.executable_path,
+                foreground_window_events.title
+            FROM events
+            JOIN foreground_window_events
+                ON foreground_window_events.event_id = events.id
+            WHERE events.event_type = ?1
+            ORDER BY events.observed_at, events.id
+            ",
         )?;
 
         let stored_events = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            .query_map([FOREGROUND_WINDOW_EVENT_TYPE], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut events = vec![];
-        for (observed_at, payload) in stored_events {
+        for (observed_at, window_id, executable, executable_path, title) in stored_events {
             events.push(Event {
                 observed_at: system_time(observed_at)?,
-                payload: serde_json::from_str::<EventPayload>(&payload)?,
+                payload: EventPayload::ForegroundWindowObserved {
+                    window_id: u64::try_from(window_id)?,
+                    executable,
+                    executable_path: executable_path.map(PathBuf::from),
+                    title,
+                },
             });
         }
 
@@ -53,19 +72,81 @@ impl EventStore {
     }
 
     fn initialize(connection: Connection) -> Result<Self> {
-        connection.execute(
-            "
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY,
-                observed_at INTEGER NOT NULL,
-                payload TEXT NOT NULL
-            )
-            ",
-            [],
-        )?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+        create_schema(&connection)?;
 
         Ok(Self { connection })
     }
+}
+
+fn create_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY,
+            observed_at INTEGER NOT NULL,
+            event_type TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS foreground_window_events (
+            event_id INTEGER PRIMARY KEY,
+            window_id INTEGER NOT NULL,
+            executable TEXT,
+            executable_path TEXT,
+            title TEXT,
+            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS events_observed_at
+            ON events(observed_at);
+
+        CREATE INDEX IF NOT EXISTS foreground_window_events_executable
+            ON foreground_window_events(executable);
+        ",
+    )?;
+
+    Ok(())
+}
+
+fn insert_event(connection: &Connection, event: &Event) -> Result<()> {
+    let observed_at = unix_milliseconds(event.observed_at)?;
+
+    connection.execute(
+        "INSERT INTO events (observed_at, event_type) VALUES (?1, ?2)",
+        params![observed_at, FOREGROUND_WINDOW_EVENT_TYPE],
+    )?;
+
+    let event_id = connection.last_insert_rowid();
+
+    match &event.payload {
+        EventPayload::ForegroundWindowObserved {
+            window_id,
+            executable,
+            executable_path,
+            title,
+        } => {
+            let window_id = i64::try_from(*window_id)?;
+            let executable_path = executable_path
+                .as_deref()
+                .map(|path| path.to_string_lossy());
+
+            connection.execute(
+                "
+                INSERT INTO foreground_window_events (
+                    event_id,
+                    window_id,
+                    executable,
+                    executable_path,
+                    title
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ",
+                params![event_id, window_id, executable, executable_path, title],
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 fn unix_milliseconds(time: SystemTime) -> Result<i64> {
@@ -92,7 +173,7 @@ mod tests {
 
     #[test]
     fn saves_and_reads_events() {
-        let store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
+        let mut store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
         let event = Event {
             observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
             payload: EventPayload::ForegroundWindowObserved {
@@ -110,7 +191,7 @@ mod tests {
 
     #[test]
     fn stores_observed_at_as_unix_milliseconds() {
-        let store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
+        let mut store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
         let event = Event {
             observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
             payload: EventPayload::ForegroundWindowObserved {
@@ -131,35 +212,5 @@ mod tests {
             .unwrap();
 
         assert_eq!(observed_at, 42_123);
-    }
-
-    #[test]
-    fn reads_events_stored_before_executable_was_added() {
-        let store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
-        store
-            .connection
-            .execute(
-                "INSERT INTO events (observed_at, payload) VALUES (?1, ?2)",
-                params![
-                    42_123,
-                    r#"{"ForegroundWindowObserved":{"window_id":123,"title":"IntelliJ IDEA"}}"#
-                ],
-            )
-            .unwrap();
-
-        let events = store.all_events().unwrap();
-
-        assert_eq!(
-            events,
-            vec![Event {
-                observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
-                payload: EventPayload::ForegroundWindowObserved {
-                    window_id: 123,
-                    executable: None,
-                    executable_path: None,
-                    title: Some("IntelliJ IDEA".to_owned()),
-                },
-            }]
-        );
     }
 }

@@ -4,8 +4,8 @@ fn main() -> anyhow::Result<()> {
     use std::time::UNIX_EPOCH;
 
     use flogging::collectors::windows::WindowsCollector;
-    use flogging::domain::EventPayload;
-    use flogging::storage::EventStore;
+    use flogging::events::EventPayload;
+    use flogging::events::store::EventStore;
 
     const DATABASE_PATH: &str = "flogging.db";
 

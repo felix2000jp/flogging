@@ -99,7 +99,7 @@ Switching to `main` or `master` and later returning to the task branch is record
 
 ## 4. Storage
 
-Storage is an in-process Rust library module represented by an `EventStore`. It is not a server, actor, or separate operating-system process.
+Storage is represented by an in-process `EventStore` inside the `events` module. It is not a server, actor, or separate operating-system process.
 
 The event store:
 
@@ -210,18 +210,23 @@ Use one Cargo package with one library crate and a thin binary:
 src/
   lib.rs
   main.rs
-  domain/
+  calendar.rs
+  engine.rs
+  events/
+    mod.rs
+    store.rs
   collectors/
-    windows/
-    git/
-  storage/
-  engine/
-  ui/
+    mod.rs
+    windows.rs
 ```
 
 `main.rs` is the composition root: it creates the store, collectors, engine, and TUI and connects their lifecycles.
 
-Domain and engine logic remain independent of Windows APIs, SQLite, and Ratatui where practical. This allows most reconstruction tests to run on macOS while the Windows collector is built and tested on Windows.
+The `events` module owns the event types and their persistence through
+`events::store`. Collectors are a separate module that creates events and writes
+them through the store. The engine depends on the event and calendar types, but
+not on collectors, Windows APIs, or SQLite. This allows reconstruction tests to
+run on macOS while the Windows collector is built and tested on Windows.
 
 ## 8. MVP completion criteria
 

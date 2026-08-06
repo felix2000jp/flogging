@@ -1,5 +1,4 @@
+pub mod calendar;
 pub mod collectors;
-pub mod domain;
 pub mod engine;
-pub mod storage;
-pub mod tui;
+pub mod events;

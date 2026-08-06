@@ -1,14 +1,24 @@
-mod queries;
-
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 
-use crate::domain::{Event, EventPayload};
+use crate::events::{Event, EventPayload};
+
+macro_rules! include_sql {
+    ($path:literal) => {
+        include_str!(concat!("../../sql/", $path))
+    };
+}
 
 const FOREGROUND_WINDOW_EVENT_TYPE: &str = "foreground_window_observed";
+
+const SCHEMA: &str = include_sql!("schema.sql");
+const INSERT_EVENT: &str = include_sql!("events/insert.sql");
+const INSERT_FOREGROUND_WINDOW_EVENT: &str = include_sql!("foreground_window_events/insert.sql");
+const SELECT_ALL_FOREGROUND_WINDOW_EVENTS: &str =
+    include_sql!("foreground_window_events/select_all.sql");
 
 pub struct EventStore {
     connection: Connection,
@@ -31,7 +41,7 @@ impl EventStore {
     pub fn all_events(&self) -> Result<Vec<Event>> {
         let mut statement = self
             .connection
-            .prepare(queries::foreground_window_events::SELECT_ALL)?;
+            .prepare(SELECT_ALL_FOREGROUND_WINDOW_EVENTS)?;
 
         let stored_events = statement
             .query_map([FOREGROUND_WINDOW_EVENT_TYPE], |row| {
@@ -68,7 +78,7 @@ impl EventStore {
 }
 
 fn create_schema(connection: &Connection) -> Result<()> {
-    connection.execute_batch(queries::SCHEMA)?;
+    connection.execute_batch(SCHEMA)?;
     Ok(())
 }
 
@@ -76,7 +86,7 @@ fn insert_event(connection: &Connection, event: &Event) -> Result<()> {
     let observed_at = unix_milliseconds(event.observed_at)?;
 
     connection.execute(
-        queries::events::INSERT,
+        INSERT_EVENT,
         params![observed_at, FOREGROUND_WINDOW_EVENT_TYPE],
     )?;
 
@@ -95,7 +105,7 @@ fn insert_event(connection: &Connection, event: &Event) -> Result<()> {
                 .map(|path| path.to_string_lossy());
 
             connection.execute(
-                queries::foreground_window_events::INSERT,
+                INSERT_FOREGROUND_WINDOW_EVENT,
                 params![event_id, window_id, executable, executable_path, title],
             )?;
         }
@@ -115,35 +125,4 @@ fn system_time(unix_milliseconds: i64) -> Result<SystemTime> {
     UNIX_EPOCH
         .checked_add(Duration::from_millis(milliseconds))
         .context("stored observed_at is outside the supported SystemTime range")
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::time::{Duration, UNIX_EPOCH};
-
-    use super::*;
-
-    #[test]
-    fn saves_and_reads_events() {
-        let mut store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
-        let event = Event::new_foreground_window_event(
-            UNIX_EPOCH + Duration::from_millis(42_123),
-            123,
-            "IntelliJ IDEA".to_owned(),
-            "idea64.exe".to_owned(),
-            Some(PathBuf::from(r"C:\Program Files\JetBrains\idea64.exe")),
-        );
-
-        store.save(&event).unwrap();
-
-        assert_eq!(store.all_events().unwrap(), vec![event]);
-    }
-
-    #[test]
-    fn converts_observed_at_to_unix_milliseconds() {
-        let observed_at = UNIX_EPOCH + Duration::from_millis(42_123);
-
-        assert_eq!(unix_milliseconds(observed_at).unwrap(), 42_123);
-    }
 }

@@ -16,8 +16,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PWSTR;
 
-use crate::domain::Event;
-use crate::storage::EventStore;
+use crate::events::Event;
+use crate::events::store::EventStore;
 
 pub struct WindowsCollector {
     stop_sender: Sender<()>,

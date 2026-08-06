@@ -2,7 +2,7 @@ use std::env;
 
 use anyhow::{Context, Result};
 use flogging::engine::build_foreground_window_calendar;
-use flogging::storage::EventStore;
+use flogging::events::store::EventStore;
 
 fn main() -> Result<()> {
     let database_path = env::args()

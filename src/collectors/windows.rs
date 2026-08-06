@@ -16,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PWSTR;
 
-use crate::domain::{Event, EventPayload};
+use crate::domain::Event;
 use crate::storage::EventStore;
 
 pub struct WindowsCollector {
@@ -100,15 +100,13 @@ fn collect_foreground_window_event() -> Option<Event> {
     let executable = executable?;
     let title = title?;
 
-    Some(Event {
+    Some(Event::new_foreground_window_event(
         observed_at,
-        payload: EventPayload::ForegroundWindowObserved {
-            window_id,
-            executable,
-            executable_path,
-            title,
-        },
-    })
+        window_id,
+        title,
+        executable,
+        executable_path,
+    ))
 }
 
 fn process_id(window: HWND) -> Option<u32> {

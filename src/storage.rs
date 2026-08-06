@@ -47,15 +47,13 @@ impl EventStore {
 
         let mut events = vec![];
         for (observed_at, window_id, executable, executable_path, title) in stored_events {
-            events.push(Event {
-                observed_at: system_time(observed_at)?,
-                payload: EventPayload::ForegroundWindowObserved {
-                    window_id: u64::try_from(window_id)?,
-                    executable,
-                    executable_path: executable_path.map(PathBuf::from),
-                    title,
-                },
-            });
+            events.push(Event::new_foreground_window_event(
+                system_time(observed_at)?,
+                u64::try_from(window_id)?,
+                title,
+                executable,
+                executable_path.map(PathBuf::from),
+            ));
         }
 
         Ok(events)
@@ -124,22 +122,18 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
 
-    use crate::domain::EventPayload;
-
     use super::*;
 
     #[test]
     fn saves_and_reads_events() {
         let mut store = EventStore::initialize(Connection::open_in_memory().unwrap()).unwrap();
-        let event = Event {
-            observed_at: UNIX_EPOCH + Duration::from_millis(42_123),
-            payload: EventPayload::ForegroundWindowObserved {
-                window_id: 123,
-                executable: "idea64.exe".to_owned(),
-                executable_path: Some(PathBuf::from(r"C:\Program Files\JetBrains\idea64.exe")),
-                title: "IntelliJ IDEA".to_owned(),
-            },
-        };
+        let event = Event::new_foreground_window_event(
+            UNIX_EPOCH + Duration::from_millis(42_123),
+            123,
+            "IntelliJ IDEA".to_owned(),
+            "idea64.exe".to_owned(),
+            Some(PathBuf::from(r"C:\Program Files\JetBrains\idea64.exe")),
+        );
 
         store.save(&event).unwrap();
 

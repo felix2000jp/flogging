@@ -19,6 +19,8 @@ const INSERT_EVENT: &str = include_sql!("events/insert.sql");
 const INSERT_FOREGROUND_WINDOW_EVENT: &str = include_sql!("foreground_window_events/insert.sql");
 const SELECT_ALL_FOREGROUND_WINDOW_EVENTS: &str =
     include_sql!("foreground_window_events/select_all.sql");
+const SELECT_FOREGROUND_WINDOW_EVENTS_BETWEEN: &str =
+    include_sql!("foreground_window_events/select_between.sql");
 
 pub struct EventStore {
     connection: Connection,
@@ -45,6 +47,39 @@ impl EventStore {
 
         let stored_events = statement
             .query_map([FOREGROUND_WINDOW_EVENT_TYPE], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut events = vec![];
+        for (observed_at, window_id, executable, executable_path, title) in stored_events {
+            events.push(Event::new_foreground_window_event(
+                system_time(observed_at)?,
+                u64::try_from(window_id)?,
+                title,
+                executable,
+                executable_path.map(PathBuf::from),
+            ));
+        }
+
+        Ok(events)
+    }
+
+    pub fn events_between(&self, start: SystemTime, end: SystemTime) -> Result<Vec<Event>> {
+        let start = unix_milliseconds(start)?;
+        let end = unix_milliseconds(end)?;
+        let mut statement = self
+            .connection
+            .prepare(SELECT_FOREGROUND_WINDOW_EVENTS_BETWEEN)?;
+
+        let stored_events = statement
+            .query_map(params![FOREGROUND_WINDOW_EVENT_TYPE, start, end], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,

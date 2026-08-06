@@ -140,12 +140,15 @@ Calendar blocks are not persisted in the MVP. They are derived views of the raw 
 
 ## 5. Engine
 
-`FloggingEngine` is the main interface to flogging's backend. The TUI calls it directly in the MVP. Future GUIs, web interfaces, and integrations can access the same capabilities through a local API without changing the collectors or event model.
+`FloggingEngine` is the main interface to flogging's backend and owns the
+`EventStore` used for calendar queries. The TUI calls it directly in the MVP.
+Future GUIs, web interfaces, and integrations can access the same capabilities
+through a local API without changing the collectors or event model.
 
 Its primary operation is conceptually:
 
 ```text
-calendar_for(date) -> Calendar
+calendar_for(NaiveDate) -> Result<Vec<CalendarBlock>>
 ```
 
 For each request, the engine:
@@ -211,7 +214,9 @@ src/
   lib.rs
   main.rs
   calendar.rs
-  engine.rs
+  engine/
+    mod.rs
+    foreground_window_calendar.rs
   events/
     mod.rs
     store.rs

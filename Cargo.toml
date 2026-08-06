@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+chrono = "0.4"
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]

@@ -1,10 +1,11 @@
+use std::time::Duration;
+
 use crate::calendar::CalendarBlock;
 use crate::events::{Event, EventPayload};
-use std::time::Duration;
 
 const MINIMUM_BLOCK_DURATION: Duration = Duration::from_secs(5 * 60);
 
-pub fn build_foreground_window_calendar(events: &[Event]) -> Vec<CalendarBlock> {
+pub(super) fn build_foreground_window_calendar(events: &[Event]) -> Vec<CalendarBlock> {
     let mut foreground_window_events: Vec<&Event> = events
         .iter()
         .filter(|event| event.is_foreground_window_event())
@@ -93,10 +94,11 @@ pub fn build_foreground_window_calendar(events: &[Event]) -> Vec<CalendarBlock> 
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
     use super::build_foreground_window_calendar;
     use crate::calendar::CalendarBlock;
     use crate::events::Event;
-    use std::time::{Duration, UNIX_EPOCH};
 
     const APPLICATION_A: &str = "application-a.exe";
     const APPLICATION_B: &str = "application-b.exe";

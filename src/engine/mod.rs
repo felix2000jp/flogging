@@ -20,14 +20,24 @@ impl FloggingEngine {
         let next_date = date
             .succ_opt()
             .context("calendar date has no representable following day")?;
+
         let start = Local
             .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
             .single()
-            .context("calendar date does not have a unique local start time")?;
+            .with_context(|| {
+                format!(
+                    "cannot build the calendar for {date}: local midnight is missing or ambiguous"
+                )
+            })?;
+
         let end = Local
             .from_local_datetime(&next_date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
             .single()
-            .context("following calendar date does not have a unique local start time")?;
+            .with_context(|| {
+                format!(
+                    "cannot build the calendar for {date}: local midnight for the following date {next_date} is missing or ambiguous"
+                )
+            })?;
 
         let events = self.event_store.events_between(start.into(), end.into())?;
         let foreground_window_calendar = build_foreground_window_calendar(&events);

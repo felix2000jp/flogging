@@ -1,7 +1,7 @@
 #[cfg(target_os = "windows")]
 fn main() -> anyhow::Result<()> {
     use std::io;
-    use std::time::UNIX_EPOCH;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use flogging::collectors::windows::WindowsCollector;
     use flogging::events::EventPayload;
@@ -10,6 +10,7 @@ fn main() -> anyhow::Result<()> {
     const DATABASE_PATH: &str = "flogging.db";
 
     let store = EventStore::open(DATABASE_PATH)?;
+    let collection_started_at = SystemTime::now();
     let collector = WindowsCollector::start(store);
 
     println!("Collecting foreground-window events in {DATABASE_PATH}.");
@@ -19,12 +20,16 @@ fn main() -> anyhow::Result<()> {
     io::stdin().read_line(&mut input)?;
 
     collector.shutdown()?;
+    let collection_finished_at = SystemTime::now();
 
     let store = EventStore::open(DATABASE_PATH)?;
-    let events = store.all_events()?;
+    let events = store.events_between(collection_started_at, collection_finished_at)?;
     let recent_events = &events[events.len().saturating_sub(10)..];
 
-    println!("Stored {} events. Most recent:", events.len());
+    println!(
+        "Stored {} events during this session. Most recent:",
+        events.len()
+    );
 
     for event in recent_events {
         let observed_at = event.observed_at.duration_since(UNIX_EPOCH)?.as_millis();

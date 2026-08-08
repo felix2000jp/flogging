@@ -1,8 +1,8 @@
 use std::env;
 
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
-use flogging::engine::FloggingEngine;
+use chrono::{Local, NaiveDate, TimeZone};
+use flogging::calendar;
 use flogging::events::store::EventStore;
 
 fn main() -> Result<()> {
@@ -15,12 +15,32 @@ fn main() -> Result<()> {
         .parse::<NaiveDate>()
         .context("calendar date must use the YYYY-MM-DD format")?;
 
+    let next_date = date
+        .succ_opt()
+        .context("calendar date has no representable following day")?;
+
+    let start = Local
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+        .single()
+        .with_context(|| {
+            format!("cannot build the calendar for {date}: local midnight is missing or ambiguous")
+        })?;
+
+    let end = Local
+        .from_local_datetime(&next_date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+        .single()
+        .with_context(|| {
+            format!(
+                "cannot build the calendar for {date}: local midnight for the following date \
+                 {next_date} is missing or ambiguous"
+            )
+        })?;
+
     let store = EventStore::open(database_path)?;
-    let engine = FloggingEngine::new(store);
+    let events = store.events_between(start.into(), end.into())?;
+    let calendar = calendar::build(date, &events);
 
-    let foreground_window_calendar = engine.calendar_for(date)?;
-
-    for block in foreground_window_calendar {
+    for block in calendar.blocks {
         println!("{:#?}", block);
     }
 

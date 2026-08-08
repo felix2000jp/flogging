@@ -5,7 +5,7 @@ use crate::events::{Event, EventPayload};
 
 const MINIMUM_BLOCK_DURATION: Duration = Duration::from_secs(5 * 60);
 
-pub(super) fn build_foreground_window_calendar(events: &[Event]) -> Vec<CalendarBlock> {
+pub(super) fn build_foreground_window_blocks(events: &[Event]) -> Vec<CalendarBlock> {
     let mut foreground_window_events: Vec<&Event> = events
         .iter()
         .filter(|event| event.is_foreground_window_event())
@@ -96,7 +96,7 @@ pub(super) fn build_foreground_window_calendar(events: &[Event]) -> Vec<Calendar
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::build_foreground_window_calendar;
+    use super::build_foreground_window_blocks;
     use crate::calendar::CalendarBlock;
     use crate::events::Event;
 
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn empty_input_produces_no_blocks() {
-        let blocks = build_foreground_window_calendar(&[]);
+        let blocks = build_foreground_window_blocks(&[]);
 
         assert!(blocks.is_empty());
     }
@@ -116,7 +116,7 @@ mod tests {
     fn retains_a_context_at_exactly_five_minutes() {
         let events = observations(APPLICATION_A, CONTEXT_A, 0, 300);
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 300, 301)]);
     }
@@ -125,7 +125,7 @@ mod tests {
     fn discards_a_context_under_five_minutes() {
         let events = observations(APPLICATION_A, CONTEXT_A, 0, 299);
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert!(blocks.is_empty());
     }
@@ -134,7 +134,7 @@ mod tests {
     fn retains_a_context_over_five_minutes() {
         let events = observations(APPLICATION_A, CONTEXT_A, 0, 301);
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 301, 302)]);
     }
@@ -144,7 +144,7 @@ mod tests {
         let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 300);
         events.reverse();
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 300, 301)]);
     }
@@ -155,7 +155,7 @@ mod tests {
         events.extend(observations(APPLICATION_B, CONTEXT_B, 361, 421));
         events.extend(observations(APPLICATION_A, CONTEXT_A, 422, 782));
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 782, 722)]);
     }
@@ -166,7 +166,7 @@ mod tests {
         events.extend(observations(APPLICATION_B, CONTEXT_B, 361, 661));
         events.extend(observations(APPLICATION_A, CONTEXT_A, 662, 1_022));
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(
             blocks,
@@ -183,7 +183,7 @@ mod tests {
         let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 360);
         events.extend(observations(APPLICATION_A, CONTEXT_A, 600, 960));
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 960, 722)]);
     }
@@ -193,7 +193,7 @@ mod tests {
         let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 360);
         events.extend(observations(APPLICATION_A, CONTEXT_A, 660, 1_020));
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(
             blocks,
@@ -209,7 +209,7 @@ mod tests {
         let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 360);
         events.extend(observations(APPLICATION_A, CONTEXT_A, 661, 1_021));
 
-        let blocks = build_foreground_window_calendar(&events);
+        let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(
             blocks,

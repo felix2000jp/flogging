@@ -1,6 +1,6 @@
 # flogging MVP
 
-Status: design agreed, implementation not started  
+Status: implementation in progress
 Primary target: Windows 11 without administrator rights  
 Language: Rust  
 Interface: terminal UI
@@ -14,8 +14,8 @@ The MVP is successful when it can run during a normal workday, preserve the coll
 The MVP consists of four parts:
 
 1. **Collectors** observe Windows and Git events.
-2. **Storage** preserves those events in SQLite.
-3. **Engine** converts stored events into a calendar.
+2. **Events** defines and preserves those facts in SQLite.
+3. **Calendar** converts events into a daily calendar.
 4. **TUI** displays the calendar and keeps it refreshed.
 
 All four parts run in one process for the MVP.
@@ -25,25 +25,17 @@ All four parts run in one process for the MVP.
 The user starts flogging from a terminal at the beginning of the workday and leaves it running. Collection continues while the application is open.
 
 ```text
-                         +----------------+
-Windows collector ------>|                |
-Git collector ---------->| EventStore     |-----> SQLite
-                         +-------+--------+
-                                 ^
-                                 | reads events
-                                 |
-                         +-------+--------+
-                         | FloggingEngine |
-                         +-------+--------+
-                                 ^
-                                 | requests Calendar
-                                 |
-                         +-------+--------+
-                         | TUI            |
-                         +----------------+
+Windows collector ------> EventStore ------> SQLite
+Git collector ----------> EventStore
+
+main: EventStore query --> calendar::build(events) --> Calendar --> TUI
 ```
 
-The collectors, storage, engine, and TUI are modules within one Rust crate. Their boundaries should remain clear so the backend can later run independently from its user interfaces.
+`main.rs` constructs the components and coordinates their lifecycles. It starts
+collectors, queries the event store for the selected date, asks the calendar
+module to build a `Calendar`, and gives that value to the TUI. These components
+remain modules within one Rust crate so their responsibilities can later be
+reused by a backend process with a different interface.
 
 ## 3. Collectors
 
@@ -78,7 +70,7 @@ The idle threshold is 15 minutes. An idle event records the actual last-input ti
 
 The collector must work as a normal Windows 11 user without elevation. Missing information from elevated or protected processes is accepted and should not stop collection.
 
-IntelliJ, VS Code, Edge, Microsoft Teams, and Windows Terminal are initially observed through their foreground-window process and title. They are not separate MVP collectors. Recognition of a repository, Jira task, GitHub pull request, or generic Teams activity from that information belongs to the engine.
+IntelliJ, VS Code, Edge, Microsoft Teams, and Windows Terminal are initially observed through their foreground-window process and title. They are not separate MVP collectors. Recognition of a repository, Jira task, GitHub pull request, or generic Teams activity from that information belongs to calendar reconstruction.
 
 ### 3.2 Git collector
 
@@ -93,7 +85,7 @@ It records:
 
 Branches such as `jofe/MBM-1111`, `jofe/MBFS-11111`, and `jofe/FCA-444` provide Jira-task evidence. Multiple repositories may support the same Jira task.
 
-A checked-out branch is context, not by itself proof of continuous activity. The engine combines Git state with duration evidence such as a focused IDE or terminal associated with that repository. Branch and commit events are still preserved even when they do not produce a calendar block.
+A checked-out branch is context, not by itself proof of continuous activity. Calendar reconstruction combines Git state with duration evidence such as a focused IDE or terminal associated with that repository. Branch and commit events are still preserved even when they do not produce a calendar block.
 
 Switching to `main` or `master` and later returning to the task branch is recorded exactly as observed. Reconstruction rules, rather than the collector, decide how that affects the calendar.
 
@@ -103,7 +95,7 @@ Storage is represented by an in-process `EventStore` inside the `events` module.
 
 The event store:
 
-- initializes and migrates the local SQLite database;
+- initializes the local SQLite schema;
 - appends one event or a small batch of events;
 - reads events for a requested time range;
 - stores collector checkpoints where a collector needs them;
@@ -130,44 +122,48 @@ The database lives below:
 %LOCALAPPDATA%\flogging\
 ```
 
-For the MVP, the engine converts stored timestamps using the computer's current
-system timezone when it constructs a calendar. This is optimized for building
+For the MVP, the runtime calculates the requested day's event-query boundaries
+using the computer's current system timezone. This is optimized for building
 today's calendar. If the system timezone later changes, a historical calendar
 may display its events in the new timezone; this tradeoff is accepted for the
 MVP.
 
 Calendar blocks are not persisted in the MVP. They are derived views of the raw events.
 
-## 5. Engine
+## 5. Calendar
 
-`FloggingEngine` is the main interface to flogging's backend and owns the
-`EventStore` used for calendar queries. The TUI calls it directly in the MVP.
-Future GUIs, web interfaces, and integrations can access the same capabilities
-through a local API without changing the collectors or event model.
+The calendar module owns the `Calendar` and `CalendarBlock` types together with
+the rules that reconstruct a calendar from events. It does not open or query an
+`EventStore`.
 
 Its primary operation is conceptually:
 
 ```text
-calendar_for(NaiveDate) -> Result<Vec<CalendarBlock>>
+calendar::build(NaiveDate, &[Event]) -> Calendar
 ```
 
-For each request, the engine:
+The caller is responsible for querying the events within the requested local
+date. For each build, the calendar module:
 
-1. reads the relevant events from the `EventStore`;
-2. orders them deterministically;
-3. reconstructs duration intervals from foreground, idle, lock, and application-lifecycle evidence;
-4. recognizes contexts such as Jira tasks, repositories, GitHub pull requests, and generic application activity;
-5. groups continuous evidence for the same context;
-6. promotes occurrences lasting at least five minutes to calendar blocks;
-7. returns the complete calendar for the requested day.
+1. orders the supplied events deterministically;
+2. reconstructs duration intervals from foreground, idle, lock, and application-lifecycle evidence;
+3. recognizes contexts such as Jira tasks, repositories, GitHub pull requests, and generic application activity;
+4. groups continuous evidence for the same context;
+5. promotes occurrences lasting at least five minutes to calendar blocks;
+6. reconciles blocks from the available event sources;
+7. returns a complete, internally valid `Calendar`.
 
-The engine rebuilds the requested day from its raw events rather than processing only previously unseen events. The expected event volume for one day is small, and a complete rebuild naturally handles late or out-of-order observations, changed rules, and day-boundary evidence.
+The requested day is rebuilt from its raw events rather than processing only
+previously unseen events. The expected event volume for one day is small, and a
+complete rebuild naturally handles late or out-of-order observations and
+changed rules.
 
-The engine does not maintain a shared in-memory calendar store in the MVP. The returned `Calendar` is a value owned by the caller. Caching can be added inside the engine later without changing its public role.
+The application does not maintain a shared in-memory calendar store in the MVP.
+The returned `Calendar` is a value owned by the runtime and passed to the TUI.
 
 ### 5.1 Context and block rules
 
-An event may support more than one context. The engine does not use a priority list that forces all evidence into a single winner.
+An event may support more than one context. Calendar reconstruction does not use a priority list that forces all evidence into a single winner.
 
 Examples:
 
@@ -187,19 +183,20 @@ The same input events and rule version must always produce the same calendar.
 
 ## 6. TUI
 
-The TUI displays one daily calendar.
+The TUI displays one daily calendar. It renders `Calendar` values but does not
+query events or reconstruct blocks.
 
 It:
 
-- starts the application and collectors;
-- requests today's calendar immediately on startup;
+- displays today's calendar immediately after the runtime builds it on startup;
 - keeps the last successfully returned `Calendar` as its display state;
-- requests a fresh calendar every five minutes while showing today;
-- refreshes immediately after a manual refresh or selected-date change;
+- reports manual-refresh and selected-date actions to the runtime;
 - displays collection or reconstruction errors without discarding the last good calendar;
 - provides enough event detail to diagnose obviously incorrect reconstruction.
 
-Historical dates do not need periodic refreshes.
+`main.rs` rebuilds today's calendar every five minutes and after a manual
+refresh or selected-date change. Historical dates do not need periodic
+refreshes.
 
 Calendar data may contain overlapping blocks. The MVP TUI may use a simple overlap marker, selection, stacking, or detail view. The underlying calendar must preserve all supported blocks; the presentation does not determine the domain model.
 
@@ -213,10 +210,9 @@ Use one Cargo package with one library crate and a thin binary:
 src/
   lib.rs
   main.rs
-  calendar.rs
-  engine/
+  calendar/
     mod.rs
-    foreground_window_calendar.rs
+    foreground_window.rs
   events/
     mod.rs
     store.rs
@@ -225,13 +221,17 @@ src/
     windows.rs
 ```
 
-`main.rs` is the composition root: it creates the store, collectors, engine, and TUI and connects their lifecycles.
+`main.rs` is the composition root and runtime coordinator: it creates the store,
+collectors, and TUI, queries events, invokes calendar construction, and connects
+their lifecycles.
 
 The `events` module owns the event types and their persistence through
 `events::store`. Collectors are a separate module that creates events and writes
-them through the store. The engine depends on the event and calendar types, but
-not on collectors, Windows APIs, or SQLite. This allows reconstruction tests to
-run on macOS while the Windows collector is built and tested on Windows.
+them through the store. The calendar module depends on event types, but not on
+the event store, collectors, Windows APIs, or SQLite. The TUI depends on the
+public calendar types, but not on events or collectors. This allows
+reconstruction tests to run on macOS while the Windows collector is built and
+tested on Windows.
 
 ## 8. MVP completion criteria
 
@@ -245,15 +245,15 @@ The MVP is complete when all four parts satisfy the following criteria.
 - Git repositories, branch changes, HEAD changes, and commits are recorded.
 - A failure in one collector does not stop the others.
 
-### Storage complete
+### Events and storage complete
 
 - Events survive application restarts.
 - Collectors can append events without writing SQL themselves.
 - Events can be queried reliably by time range.
-- Migrations and event round trips are tested.
+- Schema creation and event round trips are tested.
 - The database remains local under the user's profile.
 
-### Engine complete
+### Calendar complete
 
 - A complete daily calendar is deterministically rebuilt from stored events.
 - Jira keys are recognized from the agreed branch formats and relevant visible titles.
@@ -278,7 +278,7 @@ After several normal workdays, flogging produces a calendar that is useful enoug
 
 Development should produce a working vertical slice early rather than finish every collector before displaying data:
 
-1. Define the event model, `EventStore`, minimal engine contract, and a basic TUI surface.
+1. Define the event model, `EventStore`, Calendar contract, and a basic TUI surface.
 2. Implement the Windows collector and display a calendar reconstructed from foreground and idle events.
 3. Implement the Git collector and add repository, branch, Jira-task, and commit context.
 4. Dogfood the complete flow, turn incorrect reconstructions into test fixtures, and refine the deterministic rules.

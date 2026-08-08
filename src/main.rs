@@ -3,17 +3,25 @@ fn main() -> anyhow::Result<()> {
     use std::io;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use anyhow::Context;
     use flogging::collectors::windows::WindowsCollector;
     use flogging::events::EventPayload;
     use flogging::events::store::EventStore;
 
-    const DATABASE_PATH: &str = "flogging.db";
+    let executable_path = std::env::current_exe().context("could not locate flogging.exe")?;
+    let executable_directory = executable_path
+        .parent()
+        .context("flogging.exe does not have a parent directory")?;
+    let database_path = executable_directory.join("flogging.db");
 
-    let store = EventStore::open(DATABASE_PATH)?;
+    let store = EventStore::open(&database_path)?;
     let collection_started_at = SystemTime::now();
     let collector = WindowsCollector::start(store);
 
-    println!("Collecting foreground-window events in {DATABASE_PATH}.");
+    println!(
+        "Collecting foreground-window events in {}.",
+        database_path.display()
+    );
     println!("Press Enter to stop.");
 
     let mut input = String::new();
@@ -22,7 +30,7 @@ fn main() -> anyhow::Result<()> {
     collector.shutdown()?;
     let collection_finished_at = SystemTime::now();
 
-    let store = EventStore::open(DATABASE_PATH)?;
+    let store = EventStore::open(database_path)?;
     let events = store.events_between(collection_started_at, collection_finished_at)?;
     let recent_events = &events[events.len().saturating_sub(10)..];
 

@@ -36,7 +36,7 @@ fn main() -> Result<()> {
             )
         })?;
 
-    let store = EventStore::open(database_path)?;
+    let store = EventStore::build(database_path)?;
     let events = store.events_between(start.into(), end.into())?;
     let calendar = calendar::build(date, &events);
 

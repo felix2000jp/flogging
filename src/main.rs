@@ -1,71 +1,48 @@
+use std::io;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+
 #[cfg(target_os = "windows")]
-fn main() -> anyhow::Result<()> {
-    use std::io;
-    use std::time::{SystemTime, UNIX_EPOCH};
+use flogging::collectors::windows::WindowsCollector;
+#[cfg(target_os = "windows")]
+use flogging::events::store::EventStore;
 
-    use anyhow::Context;
-    use flogging::collectors::windows::WindowsCollector;
-    use flogging::events::EventPayload;
-    use flogging::events::store::EventStore;
-
-    let executable_path = std::env::current_exe().context("could not locate flogging.exe")?;
+fn main() -> Result<()> {
+    let executable_path =
+        std::env::current_exe().context("could not locate flogging executable")?;
     let executable_directory = executable_path
         .parent()
-        .context("flogging.exe does not have a parent directory")?;
+        .context("flogging executable does not have a parent directory")?;
     let database_path = executable_directory.join("flogging.db");
 
-    let store = EventStore::open(&database_path)?;
-    let collection_started_at = SystemTime::now();
-    let collector = WindowsCollector::start(store);
+    #[cfg(target_os = "windows")]
+    let collector = {
+        let store = EventStore::build(&database_path)?;
+        WindowsCollector::start(store)
+    };
 
-    println!(
-        "Collecting foreground-window events in {}.",
-        database_path.display()
-    );
+    let run_result = run_application(&database_path);
+
+    #[cfg(target_os = "windows")]
+    collector.shutdown()?;
+
+    run_result
+}
+
+fn run_application(database_path: &Path) -> Result<()> {
+    println!("flogging database: {}", database_path.display());
+
+    #[cfg(target_os = "windows")]
+    println!("Collecting foreground-window events.");
+
+    #[cfg(not(target_os = "windows"))]
+    println!("No event collectors are available on this platform yet.");
+
     println!("Press Enter to stop.");
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
 
-    collector.shutdown()?;
-    let collection_finished_at = SystemTime::now();
-
-    let store = EventStore::open(database_path)?;
-    let events = store.events_between(collection_started_at, collection_finished_at)?;
-    let recent_events = &events[events.len().saturating_sub(10)..];
-
-    println!(
-        "Stored {} events during this session. Most recent:",
-        events.len()
-    );
-
-    for event in recent_events {
-        let observed_at = event.observed_at.duration_since(UNIX_EPOCH)?.as_millis();
-
-        match &event.payload {
-            EventPayload::ForegroundWindowObserved {
-                window_id,
-                executable,
-                executable_path,
-                title,
-            } => {
-                let executable_path = executable_path
-                    .as_deref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "<executable path unavailable>".to_owned());
-
-                println!(
-                    "{observed_at} | window {window_id} | {title} | \
-                     {executable} | {executable_path}"
-                );
-            }
-        }
-    }
-
     Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn main() {
-    println!("The flogging foreground-window collector currently runs only on Windows.");
 }

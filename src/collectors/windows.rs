@@ -45,7 +45,7 @@ impl WindowsCollector {
     }
 }
 
-fn poll_and_store_foreground_window_events(mut store: EventStore, stop_receiver: Receiver<()>) {
+fn poll_and_store_foreground_window_events(store: EventStore, stop_receiver: Receiver<()>) {
     loop {
         if let Some(event) = collect_foreground_window_event()
             && let Err(error) = store.save(&event)

@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, params};
 
 use crate::events::{Event, EventPayload};
@@ -20,18 +21,20 @@ const INSERT_FOREGROUND_WINDOW_EVENT: &str = include_sql!("foreground_window_eve
 const SELECT_FOREGROUND_WINDOW_EVENTS_BETWEEN: &str =
     include_sql!("foreground_window_events/select_between.sql");
 
+#[derive(Clone)]
 pub struct EventStore {
-    connection: Connection,
+    connection: Arc<Mutex<Connection>>,
 }
 
 impl EventStore {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn build(path: impl AsRef<Path>) -> Result<Self> {
         let connection = Connection::open(path)?;
         Self::initialize(connection)
     }
 
-    pub fn save(&mut self, event: &Event) -> Result<()> {
-        let transaction = self.connection.transaction()?;
+    pub fn save(&self, event: &Event) -> Result<()> {
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction()?;
 
         let observed_at = unix_milliseconds(event.observed_at)?;
 
@@ -69,9 +72,8 @@ impl EventStore {
     pub fn events_between(&self, start: SystemTime, end: SystemTime) -> Result<Vec<Event>> {
         let start = unix_milliseconds(start)?;
         let end = unix_milliseconds(end)?;
-        let mut statement = self
-            .connection
-            .prepare(SELECT_FOREGROUND_WINDOW_EVENTS_BETWEEN)?;
+        let connection = self.lock_connection()?;
+        let mut statement = connection.prepare(SELECT_FOREGROUND_WINDOW_EVENTS_BETWEEN)?;
 
         let stored_events = statement
             .query_map(params![FOREGROUND_WINDOW_EVENT_TYPE, start, end], |row| {
@@ -103,7 +105,15 @@ impl EventStore {
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.execute_batch(SCHEMA)?;
 
-        Ok(Self { connection })
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+        })
+    }
+
+    fn lock_connection(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.connection
+            .lock()
+            .map_err(|_| anyhow!("event store connection lock was poisoned"))
     }
 }
 
@@ -132,7 +142,7 @@ mod tests {
 
     #[test]
     fn events_between_returns_no_events_from_an_empty_store() {
-        let store = EventStore::open(":memory:").unwrap();
+        let store = EventStore::build(":memory:").unwrap();
 
         let events = store.events_between(time(1_000), time(2_000)).unwrap();
 
@@ -141,7 +151,7 @@ mod tests {
 
     #[test]
     fn save_round_trips_a_foreground_window_event() {
-        let mut store = EventStore::open(":memory:").unwrap();
+        let store = EventStore::build(":memory:").unwrap();
         let event = event(
             1_500,
             42,
@@ -157,7 +167,7 @@ mod tests {
 
     #[test]
     fn save_round_trips_a_missing_executable_path() {
-        let mut store = EventStore::open(":memory:").unwrap();
+        let store = EventStore::build(":memory:").unwrap();
         let event = event(1_500, 42, "Project - application", None);
 
         store.save(&event).unwrap();
@@ -168,7 +178,7 @@ mod tests {
 
     #[test]
     fn events_between_uses_a_half_open_time_range() {
-        let mut store = EventStore::open(":memory:").unwrap();
+        let store = EventStore::build(":memory:").unwrap();
         let before_start = event(999, 1, "before start", None);
         let at_start = event(1_000, 2, "at start", None);
         let inside = event(1_500, 3, "inside", None);
@@ -194,7 +204,7 @@ mod tests {
 
     #[test]
     fn events_between_orders_by_time_and_then_insertion_order() {
-        let mut store = EventStore::open(":memory:").unwrap();
+        let store = EventStore::build(":memory:").unwrap();
         let first_at_same_time = event(2_000, 1, "first at same time", None);
         let latest = event(3_000, 2, "latest", None);
         let second_at_same_time = event(2_000, 3, "second at same time", None);
@@ -215,6 +225,18 @@ mod tests {
             events,
             vec![earliest, first_at_same_time, second_at_same_time, latest]
         );
+    }
+
+    #[test]
+    fn cloned_stores_share_the_same_in_memory_database() {
+        let store = EventStore::build(":memory:").unwrap();
+        let cloned_store = store.clone();
+        let event = event(1_500, 42, "Project - application", None);
+
+        cloned_store.save(&event).unwrap();
+
+        let events = store.events_between(time(1_000), time(2_000)).unwrap();
+        assert_eq!(events, vec![event]);
     }
 
     fn time(milliseconds: u64) -> SystemTime {

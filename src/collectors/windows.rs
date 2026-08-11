@@ -6,7 +6,6 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::time::SystemTime;
 
-use anyhow::{Result, anyhow};
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -35,25 +34,16 @@ impl WindowsCollector {
             worker: Some(worker),
         }
     }
-
-    pub fn shutdown(mut self) -> Result<()> {
-        self.stop_and_join()
-            .map_err(|_| anyhow!("Windows collector thread panicked"))
-    }
-
-    fn stop_and_join(&mut self) -> thread::Result<()> {
-        let Some(worker) = self.worker.take() else {
-            return Ok(());
-        };
-
-        let _ = self.stop_sender.send(());
-        worker.join()
-    }
 }
 
 impl Drop for WindowsCollector {
     fn drop(&mut self) {
-        let _ = self.stop_and_join();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+
+        let _ = self.stop_sender.send(());
+        let _ = worker.join();
     }
 }
 

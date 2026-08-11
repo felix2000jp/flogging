@@ -25,7 +25,7 @@ fn main() -> Result<()> {
     println!("flogging database: {}", database_path.display());
 
     #[cfg(target_os = "windows")]
-    let collector = WindowsCollector::start(store.clone());
+    let _collector = WindowsCollector::start(store.clone());
 
     #[cfg(target_os = "windows")]
     println!("Collecting foreground-window events.");
@@ -33,86 +33,78 @@ fn main() -> Result<()> {
     #[cfg(not(target_os = "windows"))]
     println!("No event collectors are available on this platform yet.");
 
-    let run_result = (|| -> Result<()> {
-        let (exit_sender, exit_receiver) = mpsc::channel();
-        let input_worker = thread::spawn(move || {
-            let mut input = String::new();
-            let result = io::stdin().read_line(&mut input).map(|_| ());
-            let _ = exit_sender.send(result);
-        });
+    let (exit_sender, exit_receiver) = mpsc::channel();
+    let input_worker = thread::spawn(move || {
+        let mut input = String::new();
+        let result = io::stdin().read_line(&mut input).map(|_| ());
+        let _ = exit_sender.send(result);
+    });
 
-        println!("Press Enter to stop.");
+    println!("Press Enter to stop.");
 
-        loop {
-            let date = Local::now().date_naive();
-            let next_date = date
-                .succ_opt()
-                .context("calendar date has no representable following day")?;
+    loop {
+        let date = Local::now().date_naive();
+        let next_date = date
+            .succ_opt()
+            .context("calendar date has no representable following day")?;
 
-            let start = Local
-                .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
-                .single()
-                .with_context(|| {
-                    format!(
-                        "cannot build the calendar for {date}: local midnight is missing or \
-                         ambiguous"
-                    )
-                })?;
+        let start = Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+            .single()
+            .with_context(|| {
+                format!(
+                    "cannot build the calendar for {date}: local midnight is missing or ambiguous"
+                )
+            })?;
 
-            let end = Local
-                .from_local_datetime(&next_date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
-                .single()
-                .with_context(|| {
-                    format!(
-                        "cannot build the calendar for {date}: local midnight for the following \
-                         date {next_date} is missing or ambiguous"
-                    )
-                })?;
+        let end = Local
+            .from_local_datetime(&next_date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+            .single()
+            .with_context(|| {
+                format!(
+                    "cannot build the calendar for {date}: local midnight for the following date \
+                     {next_date} is missing or ambiguous"
+                )
+            })?;
 
-            let events = store.events_between(start.into(), end.into())?;
-            let calendar = calendar::build(date, &events);
+        let events = store.events_between(start.into(), end.into())?;
+        let calendar = calendar::build(date, &events);
 
-            println!();
-            println!("Calendar for {}", calendar.date);
+        println!();
+        println!("Calendar for {}", calendar.date);
 
-            if calendar.blocks.is_empty() {
-                println!("No calendar blocks.");
-            }
-
-            for block in calendar.blocks {
-                let start: DateTime<Local> = block.start.into();
-                let finish: DateTime<Local> = block.finish.into();
-
-                println!(
-                    "{}-{} | {} | {}",
-                    start.format("%H:%M:%S"),
-                    finish.format("%H:%M:%S"),
-                    block.executable,
-                    block.description
-                );
-            }
-
-            match exit_receiver.recv_timeout(CALENDAR_REFRESH_INTERVAL) {
-                Ok(result) => {
-                    result?;
-                    break;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(anyhow!("input thread stopped unexpectedly"));
-                }
-            }
+        if calendar.blocks.is_empty() {
+            println!("No calendar blocks.");
         }
 
-        input_worker
-            .join()
-            .map_err(|_| anyhow!("input thread panicked"))?;
+        for block in calendar.blocks {
+            let start: DateTime<Local> = block.start.into();
+            let finish: DateTime<Local> = block.finish.into();
 
-        Ok(())
-    })();
+            println!(
+                "{}-{} | {} | {}",
+                start.format("%H:%M:%S"),
+                finish.format("%H:%M:%S"),
+                block.executable,
+                block.description
+            );
+        }
 
-    #[cfg(target_os = "windows")]
-    collector.shutdown()?;
+        match exit_receiver.recv_timeout(CALENDAR_REFRESH_INTERVAL) {
+            Ok(result) => {
+                result?;
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!("input thread stopped unexpectedly"));
+            }
+        }
+    }
 
-    run_result
+    input_worker
+        .join()
+        .map_err(|_| anyhow!("input thread panicked"))?;
+
+    Ok(())
 }

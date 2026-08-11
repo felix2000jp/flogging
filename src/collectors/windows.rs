@@ -21,7 +21,7 @@ use crate::events::store::EventStore;
 
 pub struct WindowsCollector {
     stop_sender: Sender<()>,
-    worker: JoinHandle<()>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl WindowsCollector {
@@ -32,16 +32,28 @@ impl WindowsCollector {
 
         Self {
             stop_sender,
-            worker,
+            worker: Some(worker),
         }
     }
 
-    pub fn shutdown(self) -> Result<()> {
-        let _ = self.stop_sender.send(());
-
-        self.worker
-            .join()
+    pub fn shutdown(mut self) -> Result<()> {
+        self.stop_and_join()
             .map_err(|_| anyhow!("Windows collector thread panicked"))
+    }
+
+    fn stop_and_join(&mut self) -> thread::Result<()> {
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+
+        let _ = self.stop_sender.send(());
+        worker.join()
+    }
+}
+
+impl Drop for WindowsCollector {
+    fn drop(&mut self) {
+        let _ = self.stop_and_join();
     }
 }
 

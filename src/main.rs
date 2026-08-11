@@ -1,14 +1,17 @@
+mod calendar;
+mod collectors;
+pub mod events;
+
 use std::io;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "windows")]
+use crate::collectors::windows::WindowsCollector;
+use crate::events::store::EventStore;
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Local, TimeZone};
-use flogging::calendar;
-#[cfg(target_os = "windows")]
-use flogging::collectors::windows::WindowsCollector;
-use flogging::events::store::EventStore;
 
 const CALENDAR_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 

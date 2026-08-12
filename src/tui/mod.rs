@@ -14,6 +14,9 @@ use crate::calendar::Calendar;
 pub enum Action {
     Quit,
     Refresh,
+    PreviousDay,
+    NextDay,
+    Today,
 }
 
 pub struct Tui {
@@ -94,7 +97,7 @@ fn render(frame: &mut Frame, calendar: &Calendar) {
         frame.render_widget(table, calendar_area);
     }
 
-    let footer = Paragraph::new("q / Esc: quit    r: refresh")
+    let footer = Paragraph::new("←/→: change day    Space: today    r: refresh    q/Esc: quit")
         .alignment(Alignment::Center)
         .style(Style::default().add_modifier(Modifier::DIM));
     frame.render_widget(footer, footer_area);
@@ -112,6 +115,9 @@ fn action_for_event(event: Event) -> Option<Action> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
         KeyCode::Char('r') => Some(Action::Refresh),
+        KeyCode::Left => Some(Action::PreviousDay),
+        KeyCode::Right => Some(Action::NextDay),
+        KeyCode::Char(' ') => Some(Action::Today),
         _ => None,
     }
 }
@@ -171,5 +177,21 @@ mod tests {
         let refresh = Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
 
         assert_eq!(action_for_event(refresh), Some(Action::Refresh));
+    }
+
+    #[test]
+    fn maps_arrow_keys_to_day_navigation_actions() {
+        let previous = Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let next = Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert_eq!(action_for_event(previous), Some(Action::PreviousDay));
+        assert_eq!(action_for_event(next), Some(Action::NextDay));
+    }
+
+    #[test]
+    fn maps_space_to_today_action() {
+        let today = Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        assert_eq!(action_for_event(today), Some(Action::Today));
     }
 }

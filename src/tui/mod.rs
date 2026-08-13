@@ -1,17 +1,22 @@
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Local};
+use anyhow::{Context, Result};
+use chrono::{DateTime, Local, NaiveDate, TimeZone};
+use ratatui::DefaultTerminal;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Alignment, Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
-use ratatui::{DefaultTerminal, Frame};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Widget};
 
-use crate::calendar::Calendar;
+use crate::calendar::{self, Calendar};
+use crate::events::store::EventStore;
+
+const CALENDAR_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
+enum Action {
     Quit,
     Refresh,
     PreviousDay,
@@ -19,88 +24,188 @@ pub enum Action {
     Today,
 }
 
-pub struct Tui {
-    terminal: DefaultTerminal,
+pub struct App {
+    store: EventStore,
+    selected_date: NaiveDate,
+    calendar: Calendar,
+    refresh_at: Instant,
+    should_quit: bool,
 }
 
-impl Tui {
-    pub fn start() -> io::Result<Self> {
-        Ok(Self {
-            terminal: ratatui::try_init()?,
-        })
+impl App {
+    pub fn new(store: EventStore) -> Result<Self> {
+        let selected_date = Local::now().date_naive();
+
+        let mut app = Self {
+            store,
+            selected_date,
+            calendar: Calendar {
+                date: selected_date,
+                blocks: vec![],
+            },
+            refresh_at: Instant::now(),
+            should_quit: false,
+        };
+
+        app.refresh_calendar()?;
+
+        Ok(app)
     }
 
-    pub fn draw(&mut self, calendar: &Calendar) -> io::Result<()> {
-        self.terminal.draw(|frame| render(frame, calendar))?;
+    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        while !self.should_quit {
+            terminal.draw(|frame| frame.render_widget(&*self, frame.area()))?;
+
+            let today = Local::now().date_naive();
+            let wait_duration = if self.selected_date == today {
+                self.refresh_at.saturating_duration_since(Instant::now())
+            } else {
+                CALENDAR_REFRESH_INTERVAL
+            };
+
+            if let Some(action) = wait_for_action(wait_duration)? {
+                self.handle_action(action)?;
+            }
+
+            if self.selected_date == Local::now().date_naive() && Instant::now() >= self.refresh_at
+            {
+                self.refresh_calendar()?;
+            }
+        }
+
         Ok(())
     }
 
-    pub fn wait_for_action(&self, timeout: Duration) -> io::Result<Option<Action>> {
-        if !event::poll(timeout)? {
-            return Ok(None);
+    fn handle_action(&mut self, action: Action) -> Result<()> {
+        match action {
+            Action::Quit => self.should_quit = true,
+            Action::Refresh => self.refresh_calendar()?,
+            Action::PreviousDay => {
+                self.selected_date = self
+                    .selected_date
+                    .pred_opt()
+                    .context("calendar date has no representable previous day")?;
+                self.refresh_calendar()?;
+            }
+            Action::NextDay => {
+                self.selected_date = self
+                    .selected_date
+                    .succ_opt()
+                    .context("calendar date has no representable following day")?;
+                self.refresh_calendar()?;
+            }
+            Action::Today => {
+                self.selected_date = Local::now().date_naive();
+                self.refresh_calendar()?;
+            }
         }
 
-        Ok(action_for_event(event::read()?))
+        Ok(())
+    }
+
+    fn refresh_calendar(&mut self) -> Result<()> {
+        let next_date = self
+            .selected_date
+            .succ_opt()
+            .context("calendar date has no representable following day")?;
+
+        let start = Local
+            .from_local_datetime(
+                &self
+                    .selected_date
+                    .and_hms_opt(0, 0, 0)
+                    .expect("midnight is valid"),
+            )
+            .single()
+            .with_context(|| {
+                format!(
+                    "cannot build the calendar for {}: local midnight is missing or ambiguous",
+                    self.selected_date
+                )
+            })?;
+
+        let end = Local
+            .from_local_datetime(&next_date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+            .single()
+            .with_context(|| {
+                format!(
+                    "cannot build the calendar for {}: local midnight for the following date {next_date} is missing or ambiguous",
+                    self.selected_date
+                )
+            })?;
+
+        let events = self.store.events_between(start.into(), end.into())?;
+        self.calendar = calendar::build(self.selected_date, &events);
+        self.refresh_at = Instant::now() + CALENDAR_REFRESH_INTERVAL;
+
+        Ok(())
     }
 }
 
-impl Drop for Tui {
-    fn drop(&mut self) {
-        ratatui::restore();
-    }
-}
+impl Widget for &App {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
+        let [header_area, calendar_area, footer_area] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
 
-fn render(frame: &mut Frame, calendar: &Calendar) {
-    let [header_area, calendar_area, footer_area] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-
-    let header = Paragraph::new(calendar.date.format("%A, %d %B %Y").to_string())
-        .alignment(Alignment::Center)
-        .block(Block::new().borders(Borders::ALL).title(" flogging "));
-    frame.render_widget(header, header_area);
-
-    if calendar.blocks.is_empty() {
-        let empty_calendar = Paragraph::new("No calendar blocks yet.")
+        let header = Paragraph::new(self.calendar.date.format("%A, %d %B %Y").to_string())
             .alignment(Alignment::Center)
-            .block(Block::new().borders(Borders::ALL).title(" Workday "));
-        frame.render_widget(empty_calendar, calendar_area);
-    } else {
-        let rows = calendar.blocks.iter().map(|block| {
-            let start: DateTime<Local> = block.start.into();
-            let finish: DateTime<Local> = block.finish.into();
+            .block(Block::new().borders(Borders::ALL).title(" flogging "));
+        header.render(header_area, buffer);
 
-            Row::new([
-                Cell::from(start.format("%H:%M").to_string()),
-                Cell::from(finish.format("%H:%M").to_string()),
-                Cell::from(block.executable.as_str()),
-                Cell::from(block.description.as_str()),
-            ])
-        });
+        if self.calendar.blocks.is_empty() {
+            let empty_calendar = Paragraph::new("No calendar blocks yet.")
+                .alignment(Alignment::Center)
+                .block(Block::new().borders(Borders::ALL).title(" Workday "));
+            empty_calendar.render(calendar_area, buffer);
+        } else {
+            let rows = self.calendar.blocks.iter().map(|block| {
+                let start: DateTime<Local> = block.start.into();
+                let finish: DateTime<Local> = block.finish.into();
 
-        let header = Row::new(["Start", "Finish", "Application", "Description"])
-            .style(Style::default().add_modifier(Modifier::BOLD));
-        let widths = [
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(24),
-            Constraint::Fill(1),
-        ];
-        let table = Table::new(rows, widths)
-            .header(header)
-            .column_spacing(1)
-            .block(Block::new().borders(Borders::ALL).title(" Workday "));
+                Row::new([
+                    Cell::from(start.format("%H:%M").to_string()),
+                    Cell::from(finish.format("%H:%M").to_string()),
+                    Cell::from(block.executable.as_str()),
+                    Cell::from(block.description.as_str()),
+                ])
+            });
 
-        frame.render_widget(table, calendar_area);
+            let header = Row::new(["Start", "Finish", "Application", "Description"])
+                .style(Style::default().add_modifier(Modifier::BOLD));
+            let widths = [
+                Constraint::Length(7),
+                Constraint::Length(7),
+                Constraint::Length(24),
+                Constraint::Fill(1),
+            ];
+            let table = Table::new(rows, widths)
+                .header(header)
+                .column_spacing(1)
+                .block(Block::new().borders(Borders::ALL).title(" Workday "));
+
+            table.render(calendar_area, buffer);
+        }
+
+        let footer = Paragraph::new("←/→: change day    Space: today    r: refresh    q/Esc: quit")
+            .alignment(Alignment::Center)
+            .style(Style::default().add_modifier(Modifier::DIM));
+        footer.render(footer_area, buffer);
+    }
+}
+
+fn wait_for_action(timeout: Duration) -> io::Result<Option<Action>> {
+    if !event::poll(timeout)? {
+        return Ok(None);
     }
 
-    let footer = Paragraph::new("←/→: change day    Space: today    r: refresh    q/Esc: quit")
-        .alignment(Alignment::Center)
-        .style(Style::default().add_modifier(Modifier::DIM));
-    frame.render_widget(footer, footer_area);
+    let event = event::read()?;
+    let action = action_for_event(event);
+
+    Ok(action)
 }
 
 fn action_for_event(event: Event) -> Option<Action> {
@@ -124,32 +229,42 @@ fn action_for_event(event: Event) -> Option<Action> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     use chrono::NaiveDate;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-    use super::{Action, action_for_event, render};
+    use super::{Action, App, action_for_event};
     use crate::calendar::{Calendar, CalendarBlock};
+    use crate::events::store::EventStore;
 
     #[test]
     fn renders_calendar_blocks() {
-        let calendar = Calendar {
-            date: NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(),
-            blocks: vec![CalendarBlock {
-                start: UNIX_EPOCH,
-                finish: UNIX_EPOCH + Duration::from_secs(300),
-                observation_count: 301,
-                executable: "code.exe".to_owned(),
-                description: "MBM-1111".to_owned(),
-            }],
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let app = App {
+            store: EventStore::build(":memory:").unwrap(),
+            selected_date: date,
+            calendar: Calendar {
+                date,
+                blocks: vec![CalendarBlock {
+                    start: UNIX_EPOCH,
+                    finish: UNIX_EPOCH + Duration::from_secs(300),
+                    observation_count: 301,
+                    executable: "code.exe".to_owned(),
+                    description: "MBM-1111".to_owned(),
+                }],
+            },
+            refresh_at: Instant::now(),
+            should_quit: false,
         };
         let backend = TestBackend::new(80, 10);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        terminal.draw(|frame| render(frame, &calendar)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(&app, frame.area()))
+            .unwrap();
 
         let rendered = terminal
             .backend()

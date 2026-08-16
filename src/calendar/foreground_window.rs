@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::calendar::CalendarBlock;
 use crate::events::{Event, EventPayload};
 
-const MINIMUM_BLOCK_DURATION: Duration = Duration::from_secs(5 * 60);
+const MAXIMUM_CONTINUOUS_OBSERVATION_GAP: Duration = Duration::from_secs(5);
 
 pub(super) fn build_foreground_window_blocks(events: &[Event]) -> Vec<CalendarBlock> {
     let mut foreground_window_events: Vec<&Event> = events
@@ -30,64 +30,30 @@ pub(super) fn build_foreground_window_blocks(events: &[Event]) -> Vec<CalendarBl
             continue;
         };
 
-        if last_block.executable.as_str() != executable.as_str()
-            || last_block.description.as_str() != title.as_str()
-        {
-            blocks.push(CalendarBlock::new(
-                event.observed_at,
-                executable.clone(),
-                title.clone(),
-            ));
-
-            continue;
-        }
-
-        let duration_since_last_block = event
+        let duration_since_last_observation = event
             .observed_at
             .duration_since(last_block.finish)
             .expect("events are processed chronologically");
 
-        if duration_since_last_block >= MINIMUM_BLOCK_DURATION {
-            blocks.push(CalendarBlock::new(
-                event.observed_at,
-                executable.clone(),
-                title.clone(),
-            ));
-
+        if last_block.executable.as_str() == executable.as_str()
+            && last_block.description.as_str() == title.as_str()
+            && duration_since_last_observation <= MAXIMUM_CONTINUOUS_OBSERVATION_GAP
+        {
+            last_block.observation_count += 1;
+            last_block.finish = event.observed_at;
             continue;
         }
 
-        last_block.observation_count += 1;
-        last_block.finish = event.observed_at;
-    }
-
-    blocks.retain(|block| {
-        let duration = block
-            .finish
-            .duration_since(block.start)
-            .expect("a calendar block cannot finish before it starts");
-
-        duration >= MINIMUM_BLOCK_DURATION
-    });
-
-    blocks.dedup_by(|current, previous| {
-        let duration_since_previous = current
-            .start
-            .duration_since(previous.finish)
-            .expect("calendar blocks are ordered chronologically");
-
-        if duration_since_previous >= MINIMUM_BLOCK_DURATION
-            || current.executable != previous.executable
-            || current.description != previous.description
-        {
-            return false;
+        if duration_since_last_observation <= MAXIMUM_CONTINUOUS_OBSERVATION_GAP {
+            last_block.finish = event.observed_at;
         }
 
-        previous.finish = current.finish;
-        previous.observation_count += current.observation_count;
-
-        true
-    });
+        blocks.push(CalendarBlock::new(
+            event.observed_at,
+            executable.clone(),
+            title.clone(),
+        ));
+    }
 
     blocks
 }
@@ -113,109 +79,137 @@ mod tests {
     }
 
     #[test]
-    fn retains_a_context_at_exactly_five_minutes() {
-        let events = observations(APPLICATION_A, CONTEXT_A, 0, 300);
+    fn builds_a_block_from_a_single_observation() {
+        let events = observations(APPLICATION_A, CONTEXT_A, 0, 0);
 
         let blocks = build_foreground_window_blocks(&events);
 
-        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 300, 301)]);
+        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 0, 1)]);
     }
 
     #[test]
-    fn discards_a_context_under_five_minutes() {
-        let events = observations(APPLICATION_A, CONTEXT_A, 0, 299);
+    fn combines_consecutive_matching_observations() {
+        let events = observations(APPLICATION_A, CONTEXT_A, 0, 2);
 
         let blocks = build_foreground_window_blocks(&events);
 
-        assert!(blocks.is_empty());
+        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 2, 3)]);
     }
 
     #[test]
-    fn retains_a_context_over_five_minutes() {
-        let events = observations(APPLICATION_A, CONTEXT_A, 0, 301);
+    fn extends_an_occurrence_until_the_next_observation() {
+        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 0);
+        events.extend(observations(APPLICATION_B, CONTEXT_B, 1, 2));
 
         let blocks = build_foreground_window_blocks(&events);
 
-        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 301, 302)]);
+        assert_eq!(
+            blocks,
+            vec![
+                block(APPLICATION_A, CONTEXT_A, 0, 1, 1),
+                block(APPLICATION_B, CONTEXT_B, 1, 2, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn retains_short_occurrences() {
+        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 2);
+        events.extend(observations(APPLICATION_B, CONTEXT_B, 3, 4));
+
+        let blocks = build_foreground_window_blocks(&events);
+
+        assert_eq!(
+            blocks,
+            vec![
+                block(APPLICATION_A, CONTEXT_A, 0, 3, 3),
+                block(APPLICATION_B, CONTEXT_B, 3, 4, 2),
+            ]
+        );
     }
 
     #[test]
     fn orders_observations_before_building_the_calendar() {
-        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 300);
+        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 2);
         events.reverse();
 
         let blocks = build_foreground_window_blocks(&events);
 
-        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 300, 301)]);
+        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 2, 3)]);
     }
 
     #[test]
-    fn merges_matching_contexts_across_a_short_context_switch() {
-        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 360);
-        events.extend(observations(APPLICATION_B, CONTEXT_B, 361, 421));
-        events.extend(observations(APPLICATION_A, CONTEXT_A, 422, 782));
-
-        let blocks = build_foreground_window_blocks(&events);
-
-        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 782, 722)]);
-    }
-
-    #[test]
-    fn retains_a_qualifying_context_between_matching_contexts() {
-        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 360);
-        events.extend(observations(APPLICATION_B, CONTEXT_B, 361, 661));
-        events.extend(observations(APPLICATION_A, CONTEXT_A, 662, 1_022));
+    fn starts_a_new_occurrence_when_the_title_changes() {
+        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 1);
+        events.extend(observations(APPLICATION_A, CONTEXT_B, 2, 3));
 
         let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(
             blocks,
             vec![
-                block(APPLICATION_A, CONTEXT_A, 0, 360, 361),
-                block(APPLICATION_B, CONTEXT_B, 361, 661, 301),
-                block(APPLICATION_A, CONTEXT_A, 662, 1_022, 361),
+                block(APPLICATION_A, CONTEXT_A, 0, 2, 2),
+                block(APPLICATION_A, CONTEXT_B, 2, 3, 2),
             ]
         );
     }
 
     #[test]
-    fn merges_matching_contexts_across_a_short_observation_gap() {
-        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 360);
-        events.extend(observations(APPLICATION_A, CONTEXT_A, 600, 960));
-
-        let blocks = build_foreground_window_blocks(&events);
-
-        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 960, 722)]);
-    }
-
-    #[test]
-    fn splits_matching_contexts_at_a_five_minute_observation_gap() {
-        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 360);
-        events.extend(observations(APPLICATION_A, CONTEXT_A, 660, 1_020));
+    fn starts_a_new_occurrence_when_the_executable_changes() {
+        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 1);
+        events.extend(observations(APPLICATION_B, CONTEXT_A, 2, 3));
 
         let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(
             blocks,
             vec![
-                block(APPLICATION_A, CONTEXT_A, 0, 360, 361),
-                block(APPLICATION_A, CONTEXT_A, 660, 1_020, 361),
+                block(APPLICATION_A, CONTEXT_A, 0, 2, 2),
+                block(APPLICATION_B, CONTEXT_A, 2, 3, 2),
             ]
         );
     }
 
     #[test]
-    fn splits_matching_contexts_above_a_five_minute_observation_gap() {
-        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 360);
-        events.extend(observations(APPLICATION_A, CONTEXT_A, 661, 1_021));
+    fn keeps_matching_contexts_as_separate_occurrences_across_a_context_switch() {
+        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 1);
+        events.extend(observations(APPLICATION_B, CONTEXT_B, 2, 3));
+        events.extend(observations(APPLICATION_A, CONTEXT_A, 4, 5));
 
         let blocks = build_foreground_window_blocks(&events);
 
         assert_eq!(
             blocks,
             vec![
-                block(APPLICATION_A, CONTEXT_A, 0, 360, 361),
-                block(APPLICATION_A, CONTEXT_A, 661, 1_021, 361),
+                block(APPLICATION_A, CONTEXT_A, 0, 2, 2),
+                block(APPLICATION_B, CONTEXT_B, 2, 4, 2),
+                block(APPLICATION_A, CONTEXT_A, 4, 5, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn combines_matching_observations_at_the_maximum_continuous_gap() {
+        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 1);
+        events.extend(observations(APPLICATION_A, CONTEXT_A, 6, 7));
+
+        let blocks = build_foreground_window_blocks(&events);
+
+        assert_eq!(blocks, vec![block(APPLICATION_A, CONTEXT_A, 0, 7, 4)]);
+    }
+
+    #[test]
+    fn splits_matching_contexts_after_collection_stops() {
+        let mut events = observations(APPLICATION_A, CONTEXT_A, 0, 1);
+        events.extend(observations(APPLICATION_A, CONTEXT_A, 7, 8));
+
+        let blocks = build_foreground_window_blocks(&events);
+
+        assert_eq!(
+            blocks,
+            vec![
+                block(APPLICATION_A, CONTEXT_A, 0, 1, 2),
+                block(APPLICATION_A, CONTEXT_A, 7, 8, 2),
             ]
         );
     }

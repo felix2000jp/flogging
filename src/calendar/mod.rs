@@ -1,23 +1,37 @@
 mod foreground_window;
+mod interval;
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use chrono::NaiveDate;
 
 use crate::events::Event;
 use foreground_window::build_foreground_window_blocks;
+use interval::build_intervals;
+
+const FIVE_MINUTES: Duration = Duration::from_secs(5 * 60);
+const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Calendar {
     pub date: NaiveDate,
     pub blocks: Vec<CalendarBlock>,
+    pub five_minute_intervals: Vec<CalendarInterval>,
+    pub fifteen_minute_intervals: Vec<CalendarInterval>,
 }
 
 impl Calendar {
     pub fn new(date: NaiveDate, events: &[Event]) -> Self {
         let blocks = build_foreground_window_blocks(events);
+        let five_minute_intervals = build_intervals(&blocks, FIVE_MINUTES);
+        let fifteen_minute_intervals = build_intervals(&blocks, FIFTEEN_MINUTES);
 
-        Self { date, blocks }
+        Self {
+            date,
+            blocks,
+            five_minute_intervals,
+            fifteen_minute_intervals,
+        }
     }
 }
 
@@ -42,13 +56,54 @@ impl CalendarBlock {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarInterval {
+    pub start: SystemTime,
+    pub finish: SystemTime,
+    pub blocks: Vec<CalendarIntervalBlock>,
+}
+
+impl CalendarInterval {
+    pub fn new(start: SystemTime, finish: SystemTime, blocks: Vec<CalendarIntervalBlock>) -> Self {
+        Self {
+            start,
+            finish,
+            blocks,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarIntervalBlock {
+    pub start: SystemTime,
+    pub finish: SystemTime,
+    pub executable: String,
+    pub description: String,
+}
+
+impl CalendarIntervalBlock {
+    pub fn new(
+        start: SystemTime,
+        finish: SystemTime,
+        executable: String,
+        description: String,
+    ) -> Self {
+        Self {
+            start,
+            finish,
+            executable,
+            description,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use chrono::NaiveDate;
 
-    use super::{Calendar, CalendarBlock};
+    use super::{Calendar, CalendarBlock, CalendarInterval, CalendarIntervalBlock};
     use crate::events::Event;
 
     #[test]
@@ -78,6 +133,32 @@ mod tests {
                 executable: "application-a.exe".to_owned(),
                 description: "Context A".to_owned(),
             }]
+        );
+        assert_eq!(
+            calendar.five_minute_intervals,
+            vec![CalendarInterval::new(
+                UNIX_EPOCH,
+                UNIX_EPOCH + Duration::from_secs(300),
+                vec![CalendarIntervalBlock::new(
+                    UNIX_EPOCH,
+                    UNIX_EPOCH + Duration::from_secs(300),
+                    "application-a.exe".to_owned(),
+                    "Context A".to_owned(),
+                )],
+            )]
+        );
+        assert_eq!(
+            calendar.fifteen_minute_intervals,
+            vec![CalendarInterval::new(
+                UNIX_EPOCH,
+                UNIX_EPOCH + Duration::from_secs(900),
+                vec![CalendarIntervalBlock::new(
+                    UNIX_EPOCH,
+                    UNIX_EPOCH + Duration::from_secs(300),
+                    "application-a.exe".to_owned(),
+                    "Context A".to_owned(),
+                )],
+            )]
         );
     }
 }

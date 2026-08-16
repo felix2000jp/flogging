@@ -10,7 +10,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Widget};
 
-use crate::calendar::{self, Calendar};
+use crate::calendar::Calendar;
 use crate::events::store::EventStore;
 
 const CALENDAR_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -135,7 +135,7 @@ impl App {
             })?;
 
         let events = self.store.events_between(start.into(), end.into())?;
-        self.calendar = calendar::build(self.selected_date, &events);
+        self.calendar = Calendar::new(self.selected_date, &events);
         self.refresh_at = Instant::now() + CALENDAR_REFRESH_INTERVAL;
 
         Ok(())

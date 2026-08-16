@@ -13,6 +13,14 @@ pub struct Calendar {
     pub blocks: Vec<CalendarBlock>,
 }
 
+impl Calendar {
+    pub fn new(date: NaiveDate, events: &[Event]) -> Self {
+        let blocks = build_foreground_window_blocks(events);
+
+        Self { date, blocks }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarBlock {
     pub start: SystemTime,
@@ -34,19 +42,13 @@ impl CalendarBlock {
     }
 }
 
-pub fn build(date: NaiveDate, events: &[Event]) -> Calendar {
-    let blocks = build_foreground_window_blocks(events);
-
-    Calendar { date, blocks }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use chrono::NaiveDate;
 
-    use super::{CalendarBlock, build};
+    use super::{Calendar, CalendarBlock};
     use crate::events::Event;
 
     #[test]
@@ -64,7 +66,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let calendar = build(date, &events);
+        let calendar = Calendar::new(date, &events);
 
         assert_eq!(calendar.date, date);
         assert_eq!(

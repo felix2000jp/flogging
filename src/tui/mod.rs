@@ -51,7 +51,7 @@ impl App {
             store,
             selected_date,
             calendar: Calendar::new(selected_date, &[]),
-            calendar_view: CalendarView::FiveMinuteIntervals,
+            calendar_view: CalendarView::Occurrences,
             scroll_offset: 0,
             refresh_at: Instant::now(),
             should_quit: false,
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn renders_calendar_blocks() {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
-        let mut app = app(
+        let app = app(
             date,
             vec![
                 CalendarBlock {
@@ -399,8 +399,6 @@ mod tests {
             vec![],
             vec![],
         );
-        app.calendar_view = CalendarView::Occurrences;
-
         let area = Rect::new(0, 0, 80, 10);
         let mut actual = Buffer::empty(area);
         app.render(area, &mut actual);
@@ -432,7 +430,7 @@ mod tests {
     #[test]
     fn renders_five_minute_intervals() {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
-        let app = app(
+        let mut app = app(
             date,
             vec![],
             vec![CalendarInterval::new(
@@ -479,6 +477,7 @@ mod tests {
             )],
             vec![],
         );
+        app.calendar_view = CalendarView::FiveMinuteIntervals;
 
         let area = Rect::new(0, 0, 80, 10);
         let mut actual = Buffer::empty(area);
@@ -509,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_an_empty_interval_view() {
+    fn renders_an_empty_default_view() {
         let app = app(
             NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(),
             vec![],
@@ -525,8 +524,8 @@ mod tests {
             "┌ flogging ────────────────────────────────────────────────────────────────────┐",
             "│                            Tuesday, 11 August 2026                           │",
             "└──────────────────────────────────────────────────────────────────────────────┘",
-            "┌ 5-minute intervals ──────────────────────────────────────────────────────────┐",
-            "│                          No 5-minute intervals yet.                          │",
+            "┌ Occurrences ─────────────────────────────────────────────────────────────────┐",
+            "│                              No occurrences yet.                             │",
             "│                                                                              │",
             "│                                                                              │",
             "│                                                                              │",
@@ -655,14 +654,14 @@ mod tests {
         app.scroll_offset = 2;
 
         app.handle_action(Action::NextView).unwrap();
-        assert_eq!(app.calendar_view, CalendarView::FifteenMinuteIntervals);
+        assert_eq!(app.calendar_view, CalendarView::FiveMinuteIntervals);
         assert_eq!(app.scroll_offset, 0);
 
         app.handle_action(Action::NextView).unwrap();
-        assert_eq!(app.calendar_view, CalendarView::Occurrences);
+        assert_eq!(app.calendar_view, CalendarView::FifteenMinuteIntervals);
 
         app.handle_action(Action::NextView).unwrap();
-        assert_eq!(app.calendar_view, CalendarView::FiveMinuteIntervals);
+        assert_eq!(app.calendar_view, CalendarView::Occurrences);
     }
 
     #[test]
@@ -695,6 +694,7 @@ mod tests {
             )],
             vec![],
         );
+        app.calendar_view = CalendarView::FiveMinuteIntervals;
 
         app.handle_action(Action::ScrollDown).unwrap();
         assert_eq!(app.scroll_offset, 1);
@@ -739,6 +739,7 @@ mod tests {
             )],
             vec![],
         );
+        app.calendar_view = CalendarView::FiveMinuteIntervals;
         app.scroll_offset = 1;
 
         app.refresh_calendar().unwrap();
@@ -775,7 +776,7 @@ mod tests {
                 five_minute_intervals,
                 fifteen_minute_intervals,
             },
-            calendar_view: CalendarView::FiveMinuteIntervals,
+            calendar_view: CalendarView::Occurrences,
             scroll_offset: 0,
             refresh_at: Instant::now(),
             should_quit: false,

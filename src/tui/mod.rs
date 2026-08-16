@@ -229,12 +229,14 @@ fn action_for_event(event: Event) -> Option<Action> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant, UNIX_EPOCH};
+    use std::time::Instant;
 
-    use chrono::NaiveDate;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use chrono::{Local, NaiveDate, TimeZone};
+    use ratatui::buffer::Buffer;
+    use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::layout::Rect;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::widgets::Widget;
 
     use super::{Action, App, action_for_event};
     use crate::calendar::{Calendar, CalendarBlock};
@@ -243,39 +245,96 @@ mod tests {
     #[test]
     fn renders_calendar_blocks() {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
-        let app = App {
-            store: EventStore::build(":memory:").unwrap(),
-            selected_date: date,
-            calendar: Calendar {
-                date,
-                blocks: vec![CalendarBlock {
-                    start: UNIX_EPOCH,
-                    finish: UNIX_EPOCH + Duration::from_secs(300),
+        let app = app(
+            date,
+            vec![
+                CalendarBlock {
+                    start: Local
+                        .with_ymd_and_hms(2026, 8, 11, 9, 0, 0)
+                        .single()
+                        .unwrap()
+                        .into(),
+                    finish: Local
+                        .with_ymd_and_hms(2026, 8, 11, 9, 5, 0)
+                        .single()
+                        .unwrap()
+                        .into(),
                     observation_count: 301,
                     executable: "code.exe".to_owned(),
                     description: "MBM-1111".to_owned(),
-                }],
-            },
-            refresh_at: Instant::now(),
-            should_quit: false,
-        };
-        let backend = TestBackend::new(80, 10);
-        let mut terminal = Terminal::new(backend).unwrap();
+                },
+                CalendarBlock {
+                    start: Local
+                        .with_ymd_and_hms(2026, 8, 11, 9, 6, 0)
+                        .single()
+                        .unwrap()
+                        .into(),
+                    finish: Local
+                        .with_ymd_and_hms(2026, 8, 11, 9, 11, 0)
+                        .single()
+                        .unwrap()
+                        .into(),
+                    observation_count: 301,
+                    executable: "edge.exe".to_owned(),
+                    description: "Documentation".to_owned(),
+                },
+            ],
+        );
 
-        terminal
-            .draw(|frame| frame.render_widget(&app, frame.area()))
-            .unwrap();
+        let area = Rect::new(0, 0, 80, 10);
+        let mut actual = Buffer::empty(area);
+        app.render(area, &mut actual);
 
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
+        let mut expected = Buffer::with_lines([
+            "┌ flogging ────────────────────────────────────────────────────────────────────┐",
+            "│                            Tuesday, 11 August 2026                           │",
+            "└──────────────────────────────────────────────────────────────────────────────┘",
+            "┌ Workday ─────────────────────────────────────────────────────────────────────┐",
+            "│Start   Finish  Application              Description                          │",
+            "│09:00   09:05   code.exe                 MBM-1111                             │",
+            "│09:06   09:11   edge.exe                 Documentation                        │",
+            "│                                                                              │",
+            "└──────────────────────────────────────────────────────────────────────────────┘",
+            "          ←/→: change day    Space: today    r: refresh    q/Esc: quit          ",
+        ]);
+        expected.set_style(
+            Rect::new(1, 4, 78, 1),
+            Style::new().add_modifier(Modifier::BOLD),
+        );
+        expected.set_style(
+            Rect::new(0, 9, 80, 1),
+            Style::new().add_modifier(Modifier::DIM),
+        );
 
-        assert!(rendered.contains("code.exe"));
-        assert!(rendered.contains("MBM-1111"));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn renders_an_empty_calendar() {
+        let app = app(NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(), vec![]);
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut actual = Buffer::empty(area);
+        app.render(area, &mut actual);
+
+        let mut expected = Buffer::with_lines([
+            "┌ flogging ────────────────────────────────────────────────────────────────────┐",
+            "│                            Tuesday, 11 August 2026                           │",
+            "└──────────────────────────────────────────────────────────────────────────────┘",
+            "┌ Workday ─────────────────────────────────────────────────────────────────────┐",
+            "│                            No calendar blocks yet.                           │",
+            "│                                                                              │",
+            "│                                                                              │",
+            "│                                                                              │",
+            "└──────────────────────────────────────────────────────────────────────────────┘",
+            "          ←/→: change day    Space: today    r: refresh    q/Esc: quit          ",
+        ]);
+        expected.set_style(
+            Rect::new(0, 9, 80, 1),
+            Style::new().add_modifier(Modifier::DIM),
+        );
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -308,5 +367,88 @@ mod tests {
         let today = Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
 
         assert_eq!(action_for_event(today), Some(Action::Today));
+    }
+
+    #[test]
+    fn ignores_key_repeats_and_releases() {
+        let repeated = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        let released = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+
+        assert_eq!(action_for_event(repeated), None);
+        assert_eq!(action_for_event(released), None);
+    }
+
+    #[test]
+    fn previous_day_action_loads_the_previous_date() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let expected_date = date.pred_opt().unwrap();
+        let mut app = app(date, vec![]);
+
+        app.handle_action(Action::PreviousDay).unwrap();
+
+        assert_eq!(app.selected_date, expected_date);
+        assert_eq!(app.calendar.date, expected_date);
+    }
+
+    #[test]
+    fn next_day_action_loads_the_next_date() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let expected_date = date.succ_opt().unwrap();
+        let mut app = app(date, vec![]);
+
+        app.handle_action(Action::NextDay).unwrap();
+
+        assert_eq!(app.selected_date, expected_date);
+        assert_eq!(app.calendar.date, expected_date);
+    }
+
+    #[test]
+    fn today_action_loads_the_current_date() {
+        let before = Local::now().date_naive();
+        let mut app = app(before.pred_opt().unwrap(), vec![]);
+
+        app.handle_action(Action::Today).unwrap();
+
+        let after = Local::now().date_naive();
+        assert!(app.selected_date == before || app.selected_date == after);
+        assert_eq!(app.calendar.date, app.selected_date);
+    }
+
+    #[test]
+    fn refresh_action_keeps_the_selected_date() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let mut app = app(date, vec![]);
+
+        app.handle_action(Action::Refresh).unwrap();
+
+        assert_eq!(app.selected_date, date);
+        assert_eq!(app.calendar.date, date);
+    }
+
+    #[test]
+    fn quit_action_marks_the_app_for_exit() {
+        let mut app = app(NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(), vec![]);
+
+        app.handle_action(Action::Quit).unwrap();
+
+        assert!(app.should_quit);
+    }
+
+    fn app(date: NaiveDate, blocks: Vec<CalendarBlock>) -> App {
+        App {
+            store: EventStore::build(":memory:").unwrap(),
+            selected_date: date,
+            calendar: Calendar { date, blocks },
+            refresh_at: Instant::now(),
+            should_quit: false,
+        }
     }
 }

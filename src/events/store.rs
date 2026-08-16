@@ -133,6 +133,7 @@ fn system_time(unix_milliseconds: i64) -> Result<SystemTime> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::thread;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::EventStore;
@@ -237,6 +238,32 @@ mod tests {
 
         let events = store.events_between(time(1_000), time(2_000)).unwrap();
         assert_eq!(events, vec![event]);
+    }
+
+    #[test]
+    fn cloned_stores_can_save_from_multiple_threads() {
+        let store = EventStore::build(":memory:").unwrap();
+        let mut workers = vec![];
+
+        for worker_id in 0_u64..4 {
+            let cloned_store = store.clone();
+
+            workers.push(thread::spawn(move || {
+                for offset in 0_u64..25 {
+                    let event_id = worker_id * 25 + offset + 1;
+                    let event = event(event_id, event_id, &format!("event {event_id}"), None);
+
+                    cloned_store.save(&event).unwrap();
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let events = store.events_between(time(0), time(101)).unwrap();
+        assert_eq!(events.len(), 100);
     }
 
     fn time(milliseconds: u64) -> SystemTime {

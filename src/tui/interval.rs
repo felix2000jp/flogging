@@ -32,6 +32,7 @@ pub(super) fn render(
     title: &str,
     intervals: &[CalendarInterval],
     state: &mut ListState,
+    context_offset: usize,
     area: Rect,
     buffer: &mut Buffer,
 ) {
@@ -52,6 +53,7 @@ pub(super) fn render(
 
     let selected = state.selected().unwrap_or(0).min(intervals.len() - 1);
     state.select(Some(selected));
+    *state.offset_mut() = selected;
 
     let block = Block::new()
         .borders(Borders::ALL)
@@ -69,6 +71,7 @@ pub(super) fn render(
                 index == selected,
                 item_width,
                 usize::from(inner_area.height),
+                context_offset,
             )
         })
         .collect::<Vec<_>>();
@@ -76,7 +79,7 @@ pub(super) fn render(
     let list = List::new(items)
         .highlight_symbol(HIGHLIGHT_SYMBOL)
         .highlight_spacing(HighlightSpacing::Always)
-        .scroll_padding(1);
+        .scroll_padding(0);
 
     StatefulWidget::render(list, inner_area, buffer, state);
 }
@@ -86,12 +89,17 @@ fn interval_item(
     selected: bool,
     width: usize,
     maximum_height: usize,
+    context_offset: usize,
 ) -> ListItem<'static> {
     let mut lines = interval_summary(interval, selected, width);
 
     if selected {
         let available_detail_lines = maximum_height.saturating_sub(lines.len());
-        lines.extend(interval_details(interval, available_detail_lines));
+        lines.extend(interval_details(
+            interval,
+            available_detail_lines,
+            context_offset,
+        ));
     }
 
     ListItem::new(Text::from(lines))
@@ -128,40 +136,64 @@ fn interval_summary(
     }
 }
 
-fn interval_details(interval: &CalendarInterval, available_lines: usize) -> Vec<Line<'static>> {
+fn interval_details(
+    interval: &CalendarInterval,
+    available_lines: usize,
+    context_offset: usize,
+) -> Vec<Line<'static>> {
     if available_lines == 0 || interval.contexts.is_empty() {
         return vec![];
     }
 
-    let visible_context_count = if interval.contexts.len() > available_lines {
-        available_lines.saturating_sub(1)
-    } else {
-        interval.contexts.len()
-    };
-    let hidden_context_count = interval.contexts.len() - visible_context_count;
+    let context_offset = context_offset.min(interval.contexts.len() - 1);
+    let show_earlier_contexts = context_offset > 0 && available_lines >= 2;
+    let context_line_capacity = available_lines - usize::from(show_earlier_contexts);
+    let remaining_context_count = interval.contexts.len() - context_offset;
+    let show_later_contexts =
+        remaining_context_count > context_line_capacity && context_line_capacity >= 2;
+    let visible_context_count =
+        remaining_context_count.min(context_line_capacity - usize::from(show_later_contexts));
+    let hidden_later_context_count = remaining_context_count - visible_context_count;
 
-    let mut lines = interval
-        .contexts
-        .iter()
-        .take(visible_context_count)
-        .enumerate()
-        .map(|(index, context)| {
-            let is_last_line = hidden_context_count == 0 && index + 1 == visible_context_count;
-            interval_detail(context, is_last_line)
-        })
-        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
 
-    if hidden_context_count > 0 {
-        lines.push(Line::from(vec![
-            Span::styled("  └─ ", Style::new().add_modifier(Modifier::DIM)),
-            Span::styled(
-                format!("… {hidden_context_count} more"),
-                Style::new().add_modifier(Modifier::DIM),
-            ),
-        ]));
+    if show_earlier_contexts {
+        lines.push(hidden_contexts_line(
+            format!("… {context_offset} earlier"),
+            false,
+        ));
+    }
+
+    lines.extend(
+        interval
+            .contexts
+            .iter()
+            .skip(context_offset)
+            .take(visible_context_count)
+            .enumerate()
+            .map(|(index, context)| {
+                let is_last_line = !show_later_contexts && index + 1 == visible_context_count;
+                interval_detail(context, is_last_line)
+            }),
+    );
+
+    if show_later_contexts {
+        lines.push(hidden_contexts_line(
+            format!("… {hidden_later_context_count} more"),
+            true,
+        ));
     }
 
     lines
+}
+
+fn hidden_contexts_line(label: String, is_last: bool) -> Line<'static> {
+    let branch = if is_last { "  └─ " } else { "  ├─ " };
+
+    Line::from(vec![
+        Span::styled(branch, Style::new().add_modifier(Modifier::DIM)),
+        Span::styled(label, Style::new().add_modifier(Modifier::DIM)),
+    ])
 }
 
 fn interval_detail(context: &CalendarIntervalContext, is_last: bool) -> Line<'static> {
@@ -325,7 +357,7 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         let mut state = ListState::default().with_selected(Some(2));
 
-        render("5-minute intervals", &[], &mut state, area, &mut buffer);
+        render("5-minute intervals", &[], &mut state, 0, area, &mut buffer);
 
         assert_eq!(state.selected(), None);
         let line = rendered_line(&buffer, 1);
@@ -343,6 +375,7 @@ mod tests {
             "5-minute intervals",
             &intervals,
             &mut state,
+            0,
             area,
             &mut buffer,
         );
@@ -368,6 +401,7 @@ mod tests {
             "5-minute intervals",
             &intervals,
             &mut state,
+            0,
             area,
             &mut buffer,
         );
@@ -376,8 +410,72 @@ mod tests {
         assert!(rendered_line(&buffer, 3).contains("… 2 more"));
     }
 
+    #[test]
+    fn selected_interval_is_the_first_visible_interval() {
+        let intervals = vec![
+            interval_with_start(0, "first.exe"),
+            interval_with_start(300, "selected.exe"),
+            interval_with_start(600, "following.exe"),
+        ];
+        let area = Rect::new(0, 0, 60, 7);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(1));
+
+        render(
+            "5-minute intervals",
+            &intervals,
+            &mut state,
+            0,
+            area,
+            &mut buffer,
+        );
+
+        assert_eq!(state.offset(), 1);
+        assert!(rendered_line(&buffer, 2).contains("selected.exe"));
+        assert!(rendered_line(&buffer, 3).contains('–'));
+        assert!(!rendered_text(&buffer).contains("first.exe"));
+    }
+
+    #[test]
+    fn context_offset_reveals_later_contexts() {
+        let intervals = vec![interval(vec![
+            interval_context(60, "first.exe"),
+            interval_context(60, "second.exe"),
+            interval_context(60, "selected.exe"),
+            interval_context(60, "fourth.exe"),
+            interval_context(60, "fifth.exe"),
+        ])];
+        let area = Rect::new(0, 0, 60, 6);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        render(
+            "5-minute intervals",
+            &intervals,
+            &mut state,
+            2,
+            area,
+            &mut buffer,
+        );
+
+        let rendered = rendered_text(&buffer);
+        assert!(rendered.contains("… 2 earlier"));
+        assert!(rendered.contains("selected.exe"));
+        assert!(rendered.contains("… 2 more"));
+        assert!(!rendered.contains("first.exe"));
+    }
+
     fn interval(contexts: Vec<CalendarIntervalContext>) -> CalendarInterval {
         CalendarInterval::new(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(300), contexts)
+    }
+
+    fn interval_with_start(start_seconds: u64, executable: &str) -> CalendarInterval {
+        let start = UNIX_EPOCH + Duration::from_secs(start_seconds);
+        CalendarInterval::new(
+            start,
+            start + Duration::from_secs(300),
+            vec![interval_context(300, executable)],
+        )
     }
 
     fn interval_context(duration_seconds: u64, executable: &str) -> CalendarIntervalContext {
@@ -392,5 +490,12 @@ mod tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
+    }
+
+    fn rendered_text(buffer: &Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| rendered_line(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

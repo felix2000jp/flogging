@@ -26,6 +26,8 @@ enum Action {
     NextView,
     ScrollUp,
     ScrollDown,
+    ScrollDetailsUp,
+    ScrollDetailsDown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +44,7 @@ pub struct App {
     calendar_view: CalendarView,
     occurrence_scroll_offset: usize,
     interval_list_state: ListState,
+    interval_context_offset: usize,
     refresh_at: Instant,
     should_quit: bool,
 }
@@ -57,6 +60,7 @@ impl App {
             calendar_view: CalendarView::Occurrences,
             occurrence_scroll_offset: 0,
             interval_list_state: ListState::default(),
+            interval_context_offset: 0,
             refresh_at: Instant::now(),
             should_quit: false,
         };
@@ -124,6 +128,23 @@ impl App {
             }
             Action::ScrollUp => self.move_up(),
             Action::ScrollDown => self.move_down(),
+            Action::ScrollDetailsUp => {
+                self.interval_context_offset = self.interval_context_offset.saturating_sub(1);
+            }
+            Action::ScrollDetailsDown => {
+                let context_count = self
+                    .current_intervals()
+                    .and_then(|intervals| {
+                        self.interval_list_state
+                            .selected()
+                            .and_then(|selected| intervals.get(selected))
+                    })
+                    .map_or(0, |interval| interval.contexts.len());
+
+                if self.interval_context_offset + 1 < context_count {
+                    self.interval_context_offset += 1;
+                }
+            }
         }
 
         Ok(())
@@ -171,12 +192,14 @@ impl App {
     fn reset_navigation(&mut self) {
         self.occurrence_scroll_offset = 0;
         self.interval_list_state = ListState::default();
+        self.interval_context_offset = 0;
 
         if self
             .current_intervals()
             .is_some_and(|intervals| !intervals.is_empty())
         {
             self.interval_list_state.select(Some(0));
+            *self.interval_list_state.offset_mut() = 0;
         }
     }
 
@@ -194,6 +217,8 @@ impl App {
 
                 if interval_count == 0 {
                     self.interval_list_state.select(None);
+                    *self.interval_list_state.offset_mut() = 0;
+                    self.interval_context_offset = 0;
                 } else {
                     let selected = self
                         .interval_list_state
@@ -201,6 +226,14 @@ impl App {
                         .unwrap_or(0)
                         .min(interval_count - 1);
                     self.interval_list_state.select(Some(selected));
+                    *self.interval_list_state.offset_mut() = selected;
+
+                    let context_count = self
+                        .current_intervals()
+                        .map_or(0, |intervals| intervals[selected].contexts.len());
+                    self.interval_context_offset = self
+                        .interval_context_offset
+                        .min(context_count.saturating_sub(1));
                 }
             }
         }
@@ -213,8 +246,13 @@ impl App {
             }
             CalendarView::FiveMinuteIntervals | CalendarView::FifteenMinuteIntervals => {
                 if let Some(selected) = self.interval_list_state.selected() {
-                    self.interval_list_state
-                        .select(Some(selected.saturating_sub(1)));
+                    let previous = selected.saturating_sub(1);
+
+                    if previous != selected {
+                        self.interval_list_state.select(Some(previous));
+                        *self.interval_list_state.offset_mut() = previous;
+                        self.interval_context_offset = 0;
+                    }
                 }
             }
         }
@@ -235,7 +273,10 @@ impl App {
                 if let Some(selected) = self.interval_list_state.selected()
                     && selected + 1 < interval_count
                 {
-                    self.interval_list_state.select(Some(selected + 1));
+                    let next = selected + 1;
+                    self.interval_list_state.select(Some(next));
+                    *self.interval_list_state.offset_mut() = next;
+                    self.interval_context_offset = 0;
                 }
             }
         }
@@ -303,6 +344,7 @@ impl Widget for &mut App {
                 "5-minute intervals",
                 &self.calendar.five_minute_intervals,
                 &mut self.interval_list_state,
+                self.interval_context_offset,
                 calendar_area,
                 buffer,
             ),
@@ -310,22 +352,23 @@ impl Widget for &mut App {
                 "15-minute intervals",
                 &self.calendar.fifteen_minute_intervals,
                 &mut self.interval_list_state,
+                self.interval_context_offset,
                 calendar_area,
                 buffer,
             ),
         }
 
         let navigation = match self.calendar_view {
-            CalendarView::Occurrences => "↑/↓: scroll",
+            CalendarView::Occurrences => {
+                "Tab: view    ↑/↓: scroll    ←/→: day    Space: today    Esc: quit"
+            }
             CalendarView::FiveMinuteIntervals | CalendarView::FifteenMinuteIntervals => {
-                "↑/↓: interval"
+                "Tab: view  ↑/↓: interval  PgUp/PgDn: details  ←/→: day  Space: today  Esc: quit"
             }
         };
-        let footer = Paragraph::new(format!(
-            "Tab: view    {navigation}    ←/→: day    Space: today    Esc: quit"
-        ))
-        .alignment(Alignment::Center)
-        .style(Style::default().add_modifier(Modifier::DIM));
+        let footer = Paragraph::new(navigation)
+            .alignment(Alignment::Center)
+            .style(Style::default().add_modifier(Modifier::DIM));
         footer.render(footer_area, buffer);
     }
 }
@@ -358,6 +401,8 @@ fn action_for_event(event: Event) -> Option<Action> {
         KeyCode::Tab => Some(Action::NextView),
         KeyCode::Up => Some(Action::ScrollUp),
         KeyCode::Down => Some(Action::ScrollDown),
+        KeyCode::PageUp => Some(Action::ScrollDetailsUp),
+        KeyCode::PageDown => Some(Action::ScrollDetailsDown),
         _ => None,
     }
 }
@@ -493,7 +538,7 @@ mod tests {
             "│    └─ 02:00  edge.exe · Documentation                                        │",
             "│                                                                              │",
             "└──────────────────────────────────────────────────────────────────────────────┘",
-            "       Tab: view    ↑/↓: interval    ←/→: day    Space: today    Esc: quit      ",
+            " Tab: view  ↑/↓: interval  PgUp/PgDn: details  ←/→: day  Space: today  Esc: quit",
         ]);
         expected.set_style(
             Rect::new(3, 4, 11, 1),
@@ -614,6 +659,15 @@ mod tests {
 
         assert_eq!(action_for_event(up), Some(Action::ScrollUp));
         assert_eq!(action_for_event(down), Some(Action::ScrollDown));
+    }
+
+    #[test]
+    fn maps_page_keys_to_detail_scroll_actions() {
+        let up = Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        let down = Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+
+        assert_eq!(action_for_event(up), Some(Action::ScrollDetailsUp));
+        assert_eq!(action_for_event(down), Some(Action::ScrollDetailsDown));
     }
 
     #[test]
@@ -751,11 +805,18 @@ mod tests {
                 CalendarInterval::new(
                     interval_start.into(),
                     (interval_start + Duration::minutes(5)).into(),
-                    vec![CalendarIntervalContext::new(
-                        StdDuration::from_secs(5 * 60),
-                        "code.exe".to_owned(),
-                        "Context A".to_owned(),
-                    )],
+                    vec![
+                        CalendarIntervalContext::new(
+                            StdDuration::from_secs(3 * 60),
+                            "code.exe".to_owned(),
+                            "Context A".to_owned(),
+                        ),
+                        CalendarIntervalContext::new(
+                            StdDuration::from_secs(2 * 60),
+                            "edge.exe".to_owned(),
+                            "Context B".to_owned(),
+                        ),
+                    ],
                 ),
                 CalendarInterval::new(
                     (interval_start + Duration::minutes(5)).into(),
@@ -772,17 +833,67 @@ mod tests {
         app.calendar_view = CalendarView::FiveMinuteIntervals;
         app.reset_navigation();
 
-        app.handle_action(Action::ScrollDown).unwrap();
-        assert_eq!(app.interval_list_state.selected(), Some(1));
+        app.handle_action(Action::ScrollDetailsDown).unwrap();
+        assert_eq!(app.interval_context_offset, 1);
 
         app.handle_action(Action::ScrollDown).unwrap();
         assert_eq!(app.interval_list_state.selected(), Some(1));
+        assert_eq!(app.interval_list_state.offset(), 1);
+        assert_eq!(app.interval_context_offset, 0);
+
+        app.handle_action(Action::ScrollDown).unwrap();
+        assert_eq!(app.interval_list_state.selected(), Some(1));
+        assert_eq!(app.interval_list_state.offset(), 1);
 
         app.handle_action(Action::ScrollUp).unwrap();
         assert_eq!(app.interval_list_state.selected(), Some(0));
+        assert_eq!(app.interval_list_state.offset(), 0);
 
         app.handle_action(Action::ScrollUp).unwrap();
         assert_eq!(app.interval_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn detail_scrolling_stays_within_the_selected_interval() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let mut app = app(
+            date,
+            vec![],
+            vec![CalendarInterval::new(
+                UNIX_EPOCH,
+                UNIX_EPOCH + StdDuration::from_secs(300),
+                vec![
+                    CalendarIntervalContext::new(
+                        StdDuration::from_secs(100),
+                        "a.exe".to_owned(),
+                        "Context A".to_owned(),
+                    ),
+                    CalendarIntervalContext::new(
+                        StdDuration::from_secs(100),
+                        "b.exe".to_owned(),
+                        "Context B".to_owned(),
+                    ),
+                    CalendarIntervalContext::new(
+                        StdDuration::from_secs(100),
+                        "c.exe".to_owned(),
+                        "Context C".to_owned(),
+                    ),
+                ],
+            )],
+            vec![],
+        );
+        app.calendar_view = CalendarView::FiveMinuteIntervals;
+        app.reset_navigation();
+
+        app.handle_action(Action::ScrollDetailsDown).unwrap();
+        app.handle_action(Action::ScrollDetailsDown).unwrap();
+        app.handle_action(Action::ScrollDetailsDown).unwrap();
+        assert_eq!(app.interval_context_offset, 2);
+
+        app.handle_action(Action::ScrollDetailsUp).unwrap();
+        app.handle_action(Action::ScrollDetailsUp).unwrap();
+        app.handle_action(Action::ScrollDetailsUp).unwrap();
+        assert_eq!(app.interval_context_offset, 0);
     }
 
     #[test]
@@ -853,6 +964,7 @@ mod tests {
             calendar_view: CalendarView::Occurrences,
             occurrence_scroll_offset: 0,
             interval_list_state: ListState::default(),
+            interval_context_offset: 0,
             refresh_at: Instant::now(),
             should_quit: false,
         }

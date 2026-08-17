@@ -60,37 +60,34 @@ impl CalendarBlock {
 pub struct CalendarInterval {
     pub start: SystemTime,
     pub finish: SystemTime,
-    pub blocks: Vec<CalendarIntervalBlock>,
+    pub contexts: Vec<CalendarIntervalContext>,
 }
 
 impl CalendarInterval {
-    pub fn new(start: SystemTime, finish: SystemTime, blocks: Vec<CalendarIntervalBlock>) -> Self {
+    pub fn new(
+        start: SystemTime,
+        finish: SystemTime,
+        contexts: Vec<CalendarIntervalContext>,
+    ) -> Self {
         Self {
             start,
             finish,
-            blocks,
+            contexts,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CalendarIntervalBlock {
-    pub start: SystemTime,
-    pub finish: SystemTime,
+pub struct CalendarIntervalContext {
+    pub duration: Duration,
     pub executable: String,
     pub description: String,
 }
 
-impl CalendarIntervalBlock {
-    pub fn new(
-        start: SystemTime,
-        finish: SystemTime,
-        executable: String,
-        description: String,
-    ) -> Self {
+impl CalendarIntervalContext {
+    pub fn new(duration: Duration, executable: String, description: String) -> Self {
         Self {
-            start,
-            finish,
+            duration,
             executable,
             description,
         }
@@ -103,7 +100,7 @@ mod tests {
 
     use chrono::NaiveDate;
 
-    use super::{Calendar, CalendarBlock, CalendarInterval, CalendarIntervalBlock};
+    use super::{Calendar, CalendarBlock, CalendarInterval, CalendarIntervalContext};
     use crate::events::Event;
 
     #[test]
@@ -139,9 +136,8 @@ mod tests {
             vec![CalendarInterval::new(
                 UNIX_EPOCH,
                 UNIX_EPOCH + Duration::from_secs(300),
-                vec![CalendarIntervalBlock::new(
-                    UNIX_EPOCH,
-                    UNIX_EPOCH + Duration::from_secs(300),
+                vec![CalendarIntervalContext::new(
+                    Duration::from_secs(300),
                     "application-a.exe".to_owned(),
                     "Context A".to_owned(),
                 )],
@@ -152,9 +148,8 @@ mod tests {
             vec![CalendarInterval::new(
                 UNIX_EPOCH,
                 UNIX_EPOCH + Duration::from_secs(900),
-                vec![CalendarIntervalBlock::new(
-                    UNIX_EPOCH,
-                    UNIX_EPOCH + Duration::from_secs(300),
+                vec![CalendarIntervalContext::new(
+                    Duration::from_secs(300),
                     "application-a.exe".to_owned(),
                     "Context A".to_owned(),
                 )],

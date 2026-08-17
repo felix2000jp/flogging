@@ -1,6 +1,7 @@
+use std::cmp::Reverse;
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::calendar::{CalendarBlock, CalendarInterval, CalendarIntervalBlock};
+use crate::calendar::{CalendarBlock, CalendarInterval, CalendarIntervalContext};
 
 pub(super) fn build_intervals(
     blocks: &[CalendarBlock],
@@ -41,20 +42,35 @@ pub(super) fn build_intervals(
                     ));
                 }
 
-                intervals
+                let interval = intervals
                     .last_mut()
-                    .expect("the interval was created above")
-                    .blocks
-                    .push(CalendarIntervalBlock::new(
-                        block_start,
-                        block_finish,
+                    .expect("the interval was created above");
+                let duration = block_finish
+                    .duration_since(block_start)
+                    .expect("an interval context cannot finish before it starts");
+
+                if let Some(context) = interval.contexts.iter_mut().find(|context| {
+                    context.executable == block.executable
+                        && context.description == block.description
+                }) {
+                    context.duration += duration;
+                } else {
+                    interval.contexts.push(CalendarIntervalContext::new(
+                        duration,
                         block.executable.clone(),
                         block.description.clone(),
                     ));
+                }
             }
 
             interval_start = interval_finish;
         }
+    }
+
+    for interval in &mut intervals {
+        interval
+            .contexts
+            .sort_by_key(|context| Reverse(context.duration));
     }
 
     intervals
@@ -65,7 +81,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::build_intervals;
-    use crate::calendar::{CalendarBlock, CalendarInterval, CalendarIntervalBlock};
+    use crate::calendar::{CalendarBlock, CalendarInterval, CalendarIntervalContext};
 
     const FIVE_MINUTES: Duration = Duration::from_secs(5 * 60);
     const APPLICATION_A: &str = "application-a.exe";
@@ -91,7 +107,7 @@ mod tests {
             vec![interval(
                 0,
                 300,
-                vec![interval_block(APPLICATION_A, CONTEXT_A, 60, 120)]
+                vec![interval_context(APPLICATION_A, CONTEXT_A, 60)]
             )]
         );
     }
@@ -105,15 +121,11 @@ mod tests {
         assert_eq!(
             intervals,
             vec![
-                interval(
-                    0,
-                    300,
-                    vec![interval_block(APPLICATION_A, CONTEXT_A, 250, 300)],
-                ),
+                interval(0, 300, vec![interval_context(APPLICATION_A, CONTEXT_A, 50)],),
                 interval(
                     300,
                     600,
-                    vec![interval_block(APPLICATION_A, CONTEXT_A, 300, 350)],
+                    vec![interval_context(APPLICATION_A, CONTEXT_A, 50)],
                 ),
             ]
         );
@@ -130,13 +142,13 @@ mod tests {
             vec![interval(
                 300,
                 600,
-                vec![interval_block(APPLICATION_A, CONTEXT_A, 300, 360)]
+                vec![interval_context(APPLICATION_A, CONTEXT_A, 60)]
             )]
         );
     }
 
     #[test]
-    fn preserves_each_block_in_an_interval() {
+    fn merges_repeated_contexts_in_an_interval() {
         let blocks = vec![
             block(APPLICATION_A, CONTEXT_A, 0, 120),
             block(APPLICATION_B, CONTEXT_B, 120, 180),
@@ -151,11 +163,50 @@ mod tests {
                 0,
                 300,
                 vec![
-                    interval_block(APPLICATION_A, CONTEXT_A, 0, 120),
-                    interval_block(APPLICATION_B, CONTEXT_B, 120, 180),
-                    interval_block(APPLICATION_A, CONTEXT_A, 180, 300),
+                    interval_context(APPLICATION_A, CONTEXT_A, 240),
+                    interval_context(APPLICATION_B, CONTEXT_B, 60),
                 ]
             )]
+        );
+    }
+
+    #[test]
+    fn keeps_different_descriptions_as_separate_contexts() {
+        let blocks = vec![
+            block(APPLICATION_A, CONTEXT_A, 0, 120),
+            block(APPLICATION_A, CONTEXT_B, 120, 300),
+        ];
+
+        let intervals = build_intervals(&blocks, FIVE_MINUTES);
+
+        assert_eq!(
+            intervals,
+            vec![interval(
+                0,
+                300,
+                vec![
+                    interval_context(APPLICATION_A, CONTEXT_B, 180),
+                    interval_context(APPLICATION_A, CONTEXT_A, 120),
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn orders_contexts_from_longest_to_shortest() {
+        let blocks = vec![
+            block(APPLICATION_A, CONTEXT_A, 0, 60),
+            block(APPLICATION_B, CONTEXT_B, 60, 300),
+        ];
+
+        let intervals = build_intervals(&blocks, FIVE_MINUTES);
+
+        assert_eq!(
+            intervals[0].contexts,
+            vec![
+                interval_context(APPLICATION_B, CONTEXT_B, 240),
+                interval_context(APPLICATION_A, CONTEXT_A, 60),
+            ]
         );
     }
 
@@ -171,15 +222,11 @@ mod tests {
         assert_eq!(
             intervals,
             vec![
-                interval(
-                    0,
-                    300,
-                    vec![interval_block(APPLICATION_A, CONTEXT_A, 60, 120)],
-                ),
+                interval(0, 300, vec![interval_context(APPLICATION_A, CONTEXT_A, 60)],),
                 interval(
                     600,
                     900,
-                    vec![interval_block(APPLICATION_B, CONTEXT_B, 660, 720)],
+                    vec![interval_context(APPLICATION_B, CONTEXT_B, 60)],
                 ),
             ]
         );
@@ -212,24 +259,22 @@ mod tests {
     fn interval(
         start_second: u64,
         finish_second: u64,
-        blocks: Vec<CalendarIntervalBlock>,
+        contexts: Vec<CalendarIntervalContext>,
     ) -> CalendarInterval {
         CalendarInterval::new(
             UNIX_EPOCH + Duration::from_secs(start_second),
             UNIX_EPOCH + Duration::from_secs(finish_second),
-            blocks,
+            contexts,
         )
     }
 
-    fn interval_block(
+    fn interval_context(
         executable: &str,
         description: &str,
-        start_second: u64,
-        finish_second: u64,
-    ) -> CalendarIntervalBlock {
-        CalendarIntervalBlock::new(
-            UNIX_EPOCH + Duration::from_secs(start_second),
-            UNIX_EPOCH + Duration::from_secs(finish_second),
+        duration_seconds: u64,
+    ) -> CalendarIntervalContext {
+        CalendarIntervalContext::new(
+            Duration::from_secs(duration_seconds),
             executable.to_owned(),
             description.to_owned(),
         )

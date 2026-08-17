@@ -374,7 +374,7 @@ mod tests {
     use ratatui::widgets::{ListState, Widget};
 
     use super::{Action, App, CalendarView, action_for_event};
-    use crate::calendar::{Calendar, CalendarBlock, CalendarInterval, CalendarIntervalBlock};
+    use crate::calendar::{Calendar, CalendarBlock, CalendarInterval, CalendarIntervalContext};
     use crate::events::store::EventStore;
 
     #[test]
@@ -463,31 +463,13 @@ mod tests {
                     .unwrap()
                     .into(),
                 vec![
-                    CalendarIntervalBlock::new(
-                        Local
-                            .with_ymd_and_hms(2026, 8, 11, 9, 0, 0)
-                            .single()
-                            .unwrap()
-                            .into(),
-                        Local
-                            .with_ymd_and_hms(2026, 8, 11, 9, 3, 0)
-                            .single()
-                            .unwrap()
-                            .into(),
+                    CalendarIntervalContext::new(
+                        StdDuration::from_secs(3 * 60),
                         "code.exe".to_owned(),
                         "MBM-1111".to_owned(),
                     ),
-                    CalendarIntervalBlock::new(
-                        Local
-                            .with_ymd_and_hms(2026, 8, 11, 9, 3, 0)
-                            .single()
-                            .unwrap()
-                            .into(),
-                        Local
-                            .with_ymd_and_hms(2026, 8, 11, 9, 5, 0)
-                            .single()
-                            .unwrap()
-                            .into(),
+                    CalendarIntervalContext::new(
+                        StdDuration::from_secs(2 * 60),
                         "edge.exe".to_owned(),
                         "Documentation".to_owned(),
                     ),
@@ -506,7 +488,7 @@ mod tests {
             "│                            Tuesday, 11 August 2026                           │",
             "└──────────────────────────────────────────────────────────────────────────────┘",
             "┌ 5-minute intervals ──────────────────────────────────────────────────────────┐",
-            "│› 09:00–09:05  ▕████████████████████████████████████▌████████████████████████▏│",
+            "│› 09:00–09:05  ▕━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━▏│",
             "│    ├─ 03:00  code.exe · MBM-1111                                             │",
             "│    └─ 02:00  edge.exe · Documentation                                        │",
             "│                                                                              │",
@@ -519,11 +501,11 @@ mod tests {
         );
         expected.set_style(
             Rect::new(17, 4, 36, 1),
-            Style::new().fg(Color::Rgb(103, 79, 224)),
+            Style::new().fg(Color::Rgb(122, 162, 247)),
         );
         expected.set_style(
             Rect::new(53, 4, 25, 1),
-            Style::new().fg(Color::Rgb(207, 156, 39)),
+            Style::new().fg(Color::Rgb(115, 218, 202)),
         );
         expected.set_style(
             Rect::new(3, 5, 5, 1),
@@ -532,7 +514,7 @@ mod tests {
         expected.set_style(
             Rect::new(8, 5, 5, 1),
             Style::new()
-                .fg(Color::Rgb(103, 79, 224))
+                .fg(Color::Rgb(122, 162, 247))
                 .add_modifier(Modifier::BOLD),
         );
         expected.set_style(
@@ -542,7 +524,7 @@ mod tests {
         expected.set_style(
             Rect::new(8, 6, 5, 1),
             Style::new()
-                .fg(Color::Rgb(207, 156, 39))
+                .fg(Color::Rgb(115, 218, 202))
                 .add_modifier(Modifier::BOLD),
         );
         expected.set_style(
@@ -769,9 +751,8 @@ mod tests {
                 CalendarInterval::new(
                     interval_start.into(),
                     (interval_start + Duration::minutes(5)).into(),
-                    vec![CalendarIntervalBlock::new(
-                        interval_start.into(),
-                        (interval_start + Duration::minutes(5)).into(),
+                    vec![CalendarIntervalContext::new(
+                        StdDuration::from_secs(5 * 60),
                         "code.exe".to_owned(),
                         "Context A".to_owned(),
                     )],
@@ -779,9 +760,8 @@ mod tests {
                 CalendarInterval::new(
                     (interval_start + Duration::minutes(5)).into(),
                     (interval_start + Duration::minutes(10)).into(),
-                    vec![CalendarIntervalBlock::new(
-                        (interval_start + Duration::minutes(5)).into(),
-                        (interval_start + Duration::minutes(10)).into(),
+                    vec![CalendarIntervalContext::new(
+                        StdDuration::from_secs(5 * 60),
                         "edge.exe".to_owned(),
                         "Context B".to_owned(),
                     )],
@@ -819,15 +799,13 @@ mod tests {
                 interval_start.into(),
                 (interval_start + Duration::minutes(5)).into(),
                 vec![
-                    CalendarIntervalBlock::new(
-                        interval_start.into(),
-                        (interval_start + Duration::minutes(2)).into(),
+                    CalendarIntervalContext::new(
+                        StdDuration::from_secs(2 * 60),
                         "code.exe".to_owned(),
                         "Context A".to_owned(),
                     ),
-                    CalendarIntervalBlock::new(
-                        (interval_start + Duration::minutes(2)).into(),
-                        (interval_start + Duration::minutes(5)).into(),
+                    CalendarIntervalContext::new(
+                        StdDuration::from_secs(3 * 60),
                         "edge.exe".to_owned(),
                         "Context B".to_owned(),
                     ),

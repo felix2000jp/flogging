@@ -1,3 +1,5 @@
+mod interval;
+
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -8,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Widget};
+use ratatui::widgets::{Block, Borders, Cell, ListState, Paragraph, Row, Table, Widget};
 
 use crate::calendar::{Calendar, CalendarInterval};
 use crate::events::store::EventStore;
@@ -38,7 +40,8 @@ pub struct App {
     selected_date: NaiveDate,
     calendar: Calendar,
     calendar_view: CalendarView,
-    scroll_offset: usize,
+    occurrence_scroll_offset: usize,
+    interval_list_state: ListState,
     refresh_at: Instant,
     should_quit: bool,
 }
@@ -52,7 +55,8 @@ impl App {
             selected_date,
             calendar: Calendar::new(selected_date, &[]),
             calendar_view: CalendarView::Occurrences,
-            scroll_offset: 0,
+            occurrence_scroll_offset: 0,
+            interval_list_state: ListState::default(),
             refresh_at: Instant::now(),
             should_quit: false,
         };
@@ -64,7 +68,7 @@ impl App {
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.should_quit {
-            terminal.draw(|frame| frame.render_widget(&*self, frame.area()))?;
+            terminal.draw(|frame| frame.render_widget(&mut *self, frame.area()))?;
 
             let today = Local::now().date_naive();
             let wait_duration = if self.selected_date == today {
@@ -94,21 +98,21 @@ impl App {
                     .selected_date
                     .pred_opt()
                     .context("calendar date has no representable previous day")?;
-                self.scroll_offset = 0;
                 self.refresh_calendar()?;
+                self.reset_navigation();
             }
             Action::NextDay => {
                 self.selected_date = self
                     .selected_date
                     .succ_opt()
                     .context("calendar date has no representable following day")?;
-                self.scroll_offset = 0;
                 self.refresh_calendar()?;
+                self.reset_navigation();
             }
             Action::Today => {
                 self.selected_date = Local::now().date_naive();
-                self.scroll_offset = 0;
                 self.refresh_calendar()?;
+                self.reset_navigation();
             }
             Action::NextView => {
                 self.calendar_view = match self.calendar_view {
@@ -116,16 +120,10 @@ impl App {
                     CalendarView::FiveMinuteIntervals => CalendarView::FifteenMinuteIntervals,
                     CalendarView::FifteenMinuteIntervals => CalendarView::Occurrences,
                 };
-                self.scroll_offset = 0;
+                self.reset_navigation();
             }
-            Action::ScrollUp => self.scroll_offset = self.scroll_offset.saturating_sub(1),
-            Action::ScrollDown => {
-                let row_count = self.current_view_row_count();
-
-                if self.scroll_offset + 1 < row_count {
-                    self.scroll_offset += 1;
-                }
-            }
+            Action::ScrollUp => self.move_up(),
+            Action::ScrollDown => self.move_down(),
         }
 
         Ok(())
@@ -164,34 +162,95 @@ impl App {
 
         let events = self.store.events_between(start.into(), end.into())?;
         self.calendar = Calendar::new(self.selected_date, &events);
-        self.scroll_offset = self
-            .scroll_offset
-            .min(self.current_view_row_count().saturating_sub(1));
+        self.clamp_navigation();
         self.refresh_at = Instant::now() + CALENDAR_REFRESH_INTERVAL;
 
         Ok(())
     }
 
-    fn current_view_row_count(&self) -> usize {
+    fn reset_navigation(&mut self) {
+        self.occurrence_scroll_offset = 0;
+        self.interval_list_state = ListState::default();
+
+        if self
+            .current_intervals()
+            .is_some_and(|intervals| !intervals.is_empty())
+        {
+            self.interval_list_state.select(Some(0));
+        }
+    }
+
+    fn clamp_navigation(&mut self) {
         match self.calendar_view {
-            CalendarView::Occurrences => self.calendar.blocks.len(),
-            CalendarView::FiveMinuteIntervals => self
-                .calendar
-                .five_minute_intervals
-                .iter()
-                .map(|interval| interval.blocks.len())
-                .sum(),
-            CalendarView::FifteenMinuteIntervals => self
-                .calendar
-                .fifteen_minute_intervals
-                .iter()
-                .map(|interval| interval.blocks.len())
-                .sum(),
+            CalendarView::Occurrences => {
+                self.occurrence_scroll_offset = self
+                    .occurrence_scroll_offset
+                    .min(self.calendar.blocks.len().saturating_sub(1));
+            }
+            CalendarView::FiveMinuteIntervals | CalendarView::FifteenMinuteIntervals => {
+                let interval_count = self
+                    .current_intervals()
+                    .map_or(0, |intervals| intervals.len());
+
+                if interval_count == 0 {
+                    self.interval_list_state.select(None);
+                } else {
+                    let selected = self
+                        .interval_list_state
+                        .selected()
+                        .unwrap_or(0)
+                        .min(interval_count - 1);
+                    self.interval_list_state.select(Some(selected));
+                }
+            }
+        }
+    }
+
+    fn move_up(&mut self) {
+        match self.calendar_view {
+            CalendarView::Occurrences => {
+                self.occurrence_scroll_offset = self.occurrence_scroll_offset.saturating_sub(1);
+            }
+            CalendarView::FiveMinuteIntervals | CalendarView::FifteenMinuteIntervals => {
+                if let Some(selected) = self.interval_list_state.selected() {
+                    self.interval_list_state
+                        .select(Some(selected.saturating_sub(1)));
+                }
+            }
+        }
+    }
+
+    fn move_down(&mut self) {
+        match self.calendar_view {
+            CalendarView::Occurrences => {
+                if self.occurrence_scroll_offset + 1 < self.calendar.blocks.len() {
+                    self.occurrence_scroll_offset += 1;
+                }
+            }
+            CalendarView::FiveMinuteIntervals | CalendarView::FifteenMinuteIntervals => {
+                let interval_count = self
+                    .current_intervals()
+                    .map_or(0, |intervals| intervals.len());
+
+                if let Some(selected) = self.interval_list_state.selected()
+                    && selected + 1 < interval_count
+                {
+                    self.interval_list_state.select(Some(selected + 1));
+                }
+            }
+        }
+    }
+
+    fn current_intervals(&self) -> Option<&[CalendarInterval]> {
+        match self.calendar_view {
+            CalendarView::Occurrences => None,
+            CalendarView::FiveMinuteIntervals => Some(&self.calendar.five_minute_intervals),
+            CalendarView::FifteenMinuteIntervals => Some(&self.calendar.fifteen_minute_intervals),
         }
     }
 }
 
-impl Widget for &App {
+impl Widget for &mut App {
     fn render(self, area: Rect, buffer: &mut Buffer) {
         let [header_area, calendar_area, footer_area] = Layout::vertical([
             Constraint::Length(3),
@@ -205,13 +264,15 @@ impl Widget for &App {
             .block(Block::new().borders(Borders::ALL).title(" flogging "));
         header.render(header_area, buffer);
 
-        let (view_title, first_column, second_column, rows) = match self.calendar_view {
+        match self.calendar_view {
             CalendarView::Occurrences => {
-                let rows = self
-                    .calendar
-                    .blocks
-                    .iter()
-                    .map(|block| {
+                if self.calendar.blocks.is_empty() {
+                    Paragraph::new("No occurrences yet.")
+                        .alignment(Alignment::Center)
+                        .block(Block::new().borders(Borders::ALL).title(" Occurrences "))
+                        .render(calendar_area, buffer);
+                } else {
+                    let rows = self.calendar.blocks.iter().map(|block| {
                         let start: DateTime<Local> = block.start.into();
                         let finish: DateTime<Local> = block.finish.into();
 
@@ -221,95 +282,52 @@ impl Widget for &App {
                             Cell::from(block.executable.as_str()),
                             Cell::from(block.description.as_str()),
                         ])
-                    })
-                    .collect::<Vec<_>>();
+                    });
+                    let header = Row::new(["Start", "Finish", "Application", "Description"])
+                        .style(Style::default().add_modifier(Modifier::BOLD));
+                    let widths = [
+                        Constraint::Length(13),
+                        Constraint::Length(9),
+                        Constraint::Length(20),
+                        Constraint::Fill(1),
+                    ];
+                    let table = Table::new(rows.skip(self.occurrence_scroll_offset), widths)
+                        .header(header)
+                        .column_spacing(1)
+                        .block(Block::new().borders(Borders::ALL).title(" Occurrences "));
 
-                ("Occurrences", "Start", "Finish", rows)
+                    table.render(calendar_area, buffer);
+                }
             }
-            CalendarView::FiveMinuteIntervals => (
+            CalendarView::FiveMinuteIntervals => interval::render(
                 "5-minute intervals",
-                "Interval",
-                "Duration",
-                interval_rows(&self.calendar.five_minute_intervals),
+                &self.calendar.five_minute_intervals,
+                &mut self.interval_list_state,
+                calendar_area,
+                buffer,
             ),
-            CalendarView::FifteenMinuteIntervals => (
+            CalendarView::FifteenMinuteIntervals => interval::render(
                 "15-minute intervals",
-                "Interval",
-                "Duration",
-                interval_rows(&self.calendar.fifteen_minute_intervals),
+                &self.calendar.fifteen_minute_intervals,
+                &mut self.interval_list_state,
+                calendar_area,
+                buffer,
             ),
-        };
-
-        if rows.is_empty() {
-            let empty_calendar = Paragraph::new(format!("No {} yet.", view_title.to_lowercase()))
-                .alignment(Alignment::Center)
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .title(format!(" {view_title} ")),
-                );
-            empty_calendar.render(calendar_area, buffer);
-        } else {
-            let header = Row::new([first_column, second_column, "Application", "Description"])
-                .style(Style::default().add_modifier(Modifier::BOLD));
-            let widths = [
-                Constraint::Length(13),
-                Constraint::Length(9),
-                Constraint::Length(20),
-                Constraint::Fill(1),
-            ];
-            let table = Table::new(rows.into_iter().skip(self.scroll_offset), widths)
-                .header(header)
-                .column_spacing(1)
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .title(format!(" {view_title} ")),
-                );
-
-            table.render(calendar_area, buffer);
         }
 
-        let footer =
-            Paragraph::new("Tab: view    ↑/↓: scroll    ←/→: day    Space: today    Esc: quit")
-                .alignment(Alignment::Center)
-                .style(Style::default().add_modifier(Modifier::DIM));
+        let navigation = match self.calendar_view {
+            CalendarView::Occurrences => "↑/↓: scroll",
+            CalendarView::FiveMinuteIntervals | CalendarView::FifteenMinuteIntervals => {
+                "↑/↓: interval"
+            }
+        };
+        let footer = Paragraph::new(format!(
+            "Tab: view    {navigation}    ←/→: day    Space: today    Esc: quit"
+        ))
+        .alignment(Alignment::Center)
+        .style(Style::default().add_modifier(Modifier::DIM));
         footer.render(footer_area, buffer);
     }
-}
-
-fn interval_rows(intervals: &[CalendarInterval]) -> Vec<Row<'_>> {
-    intervals
-        .iter()
-        .flat_map(|interval| {
-            let interval_start: DateTime<Local> = interval.start.into();
-            let interval_finish: DateTime<Local> = interval.finish.into();
-            let interval_label = format!(
-                "{}–{}",
-                interval_start.format("%H:%M"),
-                interval_finish.format("%H:%M")
-            );
-
-            interval.blocks.iter().map(move |block| {
-                let duration = block
-                    .finish
-                    .duration_since(block.start)
-                    .expect("an interval block cannot finish before it starts");
-                let duration_seconds = duration.as_secs();
-
-                Row::new([
-                    Cell::from(interval_label.clone()),
-                    Cell::from(format!(
-                        "{:02}:{:02}",
-                        duration_seconds / 60,
-                        duration_seconds % 60
-                    )),
-                    Cell::from(block.executable.as_str()),
-                    Cell::from(block.description.as_str()),
-                ])
-            })
-        })
-        .collect()
 }
 
 fn wait_for_action(timeout: Duration) -> io::Result<Option<Action>> {
@@ -346,14 +364,14 @@ fn action_for_event(event: Event) -> Option<Action> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration as StdDuration, Instant, UNIX_EPOCH};
 
     use chrono::{Duration, Local, NaiveDate, TimeZone};
     use ratatui::buffer::Buffer;
     use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
-    use ratatui::widgets::Widget;
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::widgets::{ListState, Widget};
 
     use super::{Action, App, CalendarView, action_for_event};
     use crate::calendar::{Calendar, CalendarBlock, CalendarInterval, CalendarIntervalBlock};
@@ -362,7 +380,7 @@ mod tests {
     #[test]
     fn renders_calendar_blocks() {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
-        let app = app(
+        let mut app = app(
             date,
             vec![
                 CalendarBlock {
@@ -401,7 +419,7 @@ mod tests {
         );
         let area = Rect::new(0, 0, 80, 10);
         let mut actual = Buffer::empty(area);
-        app.render(area, &mut actual);
+        (&mut app).render(area, &mut actual);
 
         let mut expected = Buffer::with_lines([
             "┌ flogging ────────────────────────────────────────────────────────────────────┐",
@@ -481,23 +499,51 @@ mod tests {
 
         let area = Rect::new(0, 0, 80, 10);
         let mut actual = Buffer::empty(area);
-        app.render(area, &mut actual);
+        (&mut app).render(area, &mut actual);
 
         let mut expected = Buffer::with_lines([
             "┌ flogging ────────────────────────────────────────────────────────────────────┐",
             "│                            Tuesday, 11 August 2026                           │",
             "└──────────────────────────────────────────────────────────────────────────────┘",
             "┌ 5-minute intervals ──────────────────────────────────────────────────────────┐",
-            "│Interval      Duration  Application          Description                      │",
-            "│09:00–09:05   03:00     code.exe             MBM-1111                         │",
-            "│09:00–09:05   02:00     edge.exe             Documentation                    │",
+            "│› 09:00–09:05  ▕████████████████████████████████████▌████████████████████████▏│",
+            "│    ├─ 03:00  code.exe · MBM-1111                                             │",
+            "│    └─ 02:00  edge.exe · Documentation                                        │",
             "│                                                                              │",
             "└──────────────────────────────────────────────────────────────────────────────┘",
-            "        Tab: view    ↑/↓: scroll    ←/→: day    Space: today    Esc: quit       ",
+            "       Tab: view    ↑/↓: interval    ←/→: day    Space: today    Esc: quit      ",
         ]);
         expected.set_style(
-            Rect::new(1, 4, 78, 1),
+            Rect::new(3, 4, 11, 1),
             Style::new().add_modifier(Modifier::BOLD),
+        );
+        expected.set_style(
+            Rect::new(17, 4, 36, 1),
+            Style::new().fg(Color::Rgb(103, 79, 224)),
+        );
+        expected.set_style(
+            Rect::new(53, 4, 25, 1),
+            Style::new().fg(Color::Rgb(207, 156, 39)),
+        );
+        expected.set_style(
+            Rect::new(3, 5, 5, 1),
+            Style::new().add_modifier(Modifier::DIM),
+        );
+        expected.set_style(
+            Rect::new(8, 5, 5, 1),
+            Style::new()
+                .fg(Color::Rgb(103, 79, 224))
+                .add_modifier(Modifier::BOLD),
+        );
+        expected.set_style(
+            Rect::new(3, 6, 5, 1),
+            Style::new().add_modifier(Modifier::DIM),
+        );
+        expected.set_style(
+            Rect::new(8, 6, 5, 1),
+            Style::new()
+                .fg(Color::Rgb(207, 156, 39))
+                .add_modifier(Modifier::BOLD),
         );
         expected.set_style(
             Rect::new(0, 9, 80, 1),
@@ -509,7 +555,7 @@ mod tests {
 
     #[test]
     fn renders_an_empty_default_view() {
-        let app = app(
+        let mut app = app(
             NaiveDate::from_ymd_opt(2026, 8, 11).unwrap(),
             vec![],
             vec![],
@@ -518,7 +564,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 80, 10);
         let mut actual = Buffer::empty(area);
-        app.render(area, &mut actual);
+        (&mut app).render(area, &mut actual);
 
         let mut expected = Buffer::with_lines([
             "┌ flogging ────────────────────────────────────────────────────────────────────┐",
@@ -610,13 +656,13 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
         let expected_date = date.pred_opt().unwrap();
         let mut app = empty_app(date);
-        app.scroll_offset = 2;
+        app.occurrence_scroll_offset = 2;
 
         app.handle_action(Action::PreviousDay).unwrap();
 
         assert_eq!(app.selected_date, expected_date);
         assert_eq!(app.calendar.date, expected_date);
-        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.occurrence_scroll_offset, 0);
     }
 
     #[test]
@@ -624,38 +670,38 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
         let expected_date = date.succ_opt().unwrap();
         let mut app = empty_app(date);
-        app.scroll_offset = 2;
+        app.occurrence_scroll_offset = 2;
 
         app.handle_action(Action::NextDay).unwrap();
 
         assert_eq!(app.selected_date, expected_date);
         assert_eq!(app.calendar.date, expected_date);
-        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.occurrence_scroll_offset, 0);
     }
 
     #[test]
     fn today_action_loads_the_current_date() {
         let before = Local::now().date_naive();
         let mut app = empty_app(before.pred_opt().unwrap());
-        app.scroll_offset = 2;
+        app.occurrence_scroll_offset = 2;
 
         app.handle_action(Action::Today).unwrap();
 
         let after = Local::now().date_naive();
         assert!(app.selected_date == before || app.selected_date == after);
         assert_eq!(app.calendar.date, app.selected_date);
-        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.occurrence_scroll_offset, 0);
     }
 
     #[test]
     fn next_view_action_cycles_calendar_views() {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
         let mut app = empty_app(date);
-        app.scroll_offset = 2;
+        app.occurrence_scroll_offset = 2;
 
         app.handle_action(Action::NextView).unwrap();
         assert_eq!(app.calendar_view, CalendarView::FiveMinuteIntervals);
-        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.occurrence_scroll_offset, 0);
 
         app.handle_action(Action::NextView).unwrap();
         assert_eq!(app.calendar_view, CalendarView::FifteenMinuteIntervals);
@@ -665,52 +711,102 @@ mod tests {
     }
 
     #[test]
-    fn scroll_actions_stay_within_the_current_view() {
+    fn entering_an_interval_view_selects_the_first_interval() {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
-        let interval_start = Local
-            .with_ymd_and_hms(2026, 8, 11, 9, 0, 0)
-            .single()
-            .unwrap();
         let mut app = app(
             date,
             vec![],
             vec![CalendarInterval::new(
-                interval_start.into(),
-                (interval_start + Duration::minutes(5)).into(),
-                vec![
-                    CalendarIntervalBlock::new(
-                        interval_start.into(),
-                        (interval_start + Duration::minutes(2)).into(),
-                        "code.exe".to_owned(),
-                        "Context A".to_owned(),
-                    ),
-                    CalendarIntervalBlock::new(
-                        (interval_start + Duration::minutes(2)).into(),
-                        (interval_start + Duration::minutes(5)).into(),
-                        "edge.exe".to_owned(),
-                        "Context B".to_owned(),
-                    ),
-                ],
+                UNIX_EPOCH,
+                UNIX_EPOCH + StdDuration::from_secs(300),
+                vec![],
             )],
             vec![],
         );
-        app.calendar_view = CalendarView::FiveMinuteIntervals;
 
-        app.handle_action(Action::ScrollDown).unwrap();
-        assert_eq!(app.scroll_offset, 1);
+        app.handle_action(Action::NextView).unwrap();
 
-        app.handle_action(Action::ScrollDown).unwrap();
-        assert_eq!(app.scroll_offset, 1);
-
-        app.handle_action(Action::ScrollUp).unwrap();
-        assert_eq!(app.scroll_offset, 0);
-
-        app.handle_action(Action::ScrollUp).unwrap();
-        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.interval_list_state.selected(), Some(0));
     }
 
     #[test]
-    fn refreshing_clamps_scroll_to_the_available_rows() {
+    fn occurrence_scrolling_stays_within_bounds() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let mut app = app(
+            date,
+            vec![
+                CalendarBlock::new(UNIX_EPOCH, "a.exe".to_owned(), "A".to_owned()),
+                CalendarBlock::new(UNIX_EPOCH, "b.exe".to_owned(), "B".to_owned()),
+            ],
+            vec![],
+            vec![],
+        );
+
+        app.handle_action(Action::ScrollDown).unwrap();
+        assert_eq!(app.occurrence_scroll_offset, 1);
+
+        app.handle_action(Action::ScrollDown).unwrap();
+        assert_eq!(app.occurrence_scroll_offset, 1);
+
+        app.handle_action(Action::ScrollUp).unwrap();
+        assert_eq!(app.occurrence_scroll_offset, 0);
+
+        app.handle_action(Action::ScrollUp).unwrap();
+        assert_eq!(app.occurrence_scroll_offset, 0);
+    }
+
+    #[test]
+    fn interval_selection_stays_within_bounds() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let interval_start = Local
+            .with_ymd_and_hms(2026, 8, 11, 9, 0, 0)
+            .single()
+            .unwrap();
+        let mut app = app(
+            date,
+            vec![],
+            vec![
+                CalendarInterval::new(
+                    interval_start.into(),
+                    (interval_start + Duration::minutes(5)).into(),
+                    vec![CalendarIntervalBlock::new(
+                        interval_start.into(),
+                        (interval_start + Duration::minutes(5)).into(),
+                        "code.exe".to_owned(),
+                        "Context A".to_owned(),
+                    )],
+                ),
+                CalendarInterval::new(
+                    (interval_start + Duration::minutes(5)).into(),
+                    (interval_start + Duration::minutes(10)).into(),
+                    vec![CalendarIntervalBlock::new(
+                        (interval_start + Duration::minutes(5)).into(),
+                        (interval_start + Duration::minutes(10)).into(),
+                        "edge.exe".to_owned(),
+                        "Context B".to_owned(),
+                    )],
+                ),
+            ],
+            vec![],
+        );
+        app.calendar_view = CalendarView::FiveMinuteIntervals;
+        app.reset_navigation();
+
+        app.handle_action(Action::ScrollDown).unwrap();
+        assert_eq!(app.interval_list_state.selected(), Some(1));
+
+        app.handle_action(Action::ScrollDown).unwrap();
+        assert_eq!(app.interval_list_state.selected(), Some(1));
+
+        app.handle_action(Action::ScrollUp).unwrap();
+        assert_eq!(app.interval_list_state.selected(), Some(0));
+
+        app.handle_action(Action::ScrollUp).unwrap();
+        assert_eq!(app.interval_list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn refreshing_clears_selection_when_no_intervals_remain() {
         let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
         let interval_start = Local
             .with_ymd_and_hms(2026, 8, 11, 9, 0, 0)
@@ -740,12 +836,12 @@ mod tests {
             vec![],
         );
         app.calendar_view = CalendarView::FiveMinuteIntervals;
-        app.scroll_offset = 1;
+        app.interval_list_state.select(Some(0));
 
         app.refresh_calendar().unwrap();
 
         assert!(app.calendar.five_minute_intervals.is_empty());
-        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.interval_list_state.selected(), None);
     }
 
     #[test]
@@ -777,7 +873,8 @@ mod tests {
                 fifteen_minute_intervals,
             },
             calendar_view: CalendarView::Occurrences,
-            scroll_offset: 0,
+            occurrence_scroll_offset: 0,
+            interval_list_state: ListState::default(),
             refresh_at: Instant::now(),
             should_quit: false,
         }

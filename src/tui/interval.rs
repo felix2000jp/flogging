@@ -2,216 +2,226 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span, Text};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, HighlightSpacing, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
+    Block, Borders, Cell, HighlightSpacing, List, ListItem, ListState, Paragraph, Row,
+    StatefulWidget, Table, Widget,
 };
 
-use crate::calendar::{CalendarInterval, CalendarIntervalContext};
+use super::{Focus, theme};
+use crate::calendar::CalendarInterval;
 
 const HIGHLIGHT_SYMBOL: &str = "› ";
 const HIGHLIGHT_SYMBOL_WIDTH: usize = 2;
-const INLINE_TIMELINE_MINIMUM_WIDTH: usize = 32;
 const TIME_LABEL_WIDTH: usize = 11;
-const APPLICATION_COLORS: [Color; 10] = [
-    Color::Rgb(122, 162, 247),
-    Color::Rgb(125, 207, 255),
-    Color::Rgb(115, 218, 202),
-    Color::Rgb(42, 195, 222),
-    Color::Rgb(158, 206, 106),
-    Color::Rgb(224, 175, 104),
-    Color::Rgb(255, 158, 100),
-    Color::Rgb(247, 118, 142),
-    Color::Rgb(187, 154, 247),
-    Color::Rgb(157, 124, 216),
-];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PaneAreas {
+    pub(super) intervals: Rect,
+    pub(super) details: Rect,
+}
 
 pub(super) fn render(
     title: &str,
     intervals: &[CalendarInterval],
     state: &mut ListState,
     context_offset: usize,
+    focus: Focus,
+    area: Rect,
+    buffer: &mut Buffer,
+) -> PaneAreas {
+    let [intervals_area, details_area] =
+        Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .spacing(1)
+            .areas(area);
+
+    render_intervals(title, intervals, state, focus, intervals_area, buffer);
+    render_details(
+        intervals,
+        state.selected(),
+        context_offset,
+        focus,
+        details_area,
+        buffer,
+    );
+
+    PaneAreas {
+        intervals: intervals_area,
+        details: details_area,
+    }
+}
+
+fn render_intervals(
+    title: &str,
+    intervals: &[CalendarInterval],
+    state: &mut ListState,
+    focus: Focus,
     area: Rect,
     buffer: &mut Buffer,
 ) {
+    let block = pane_block(title, focus == Focus::Intervals);
+
     if intervals.is_empty() {
         state.select(None);
+        *state.offset_mut() = 0;
 
         Paragraph::new(format!("No {} yet.", title.to_lowercase()))
             .alignment(Alignment::Center)
-            .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .title(format!(" {title} ")),
-            )
+            .style(Style::new().fg(theme::SECONDARY_TEXT))
+            .block(block)
             .render(area, buffer);
-
         return;
     }
 
     let selected = state.selected().unwrap_or(0).min(intervals.len() - 1);
     state.select(Some(selected));
-    *state.offset_mut() = selected;
 
-    let block = Block::new()
-        .borders(Borders::ALL)
-        .title(format!(" {title} "));
-    let inner_area = block.inner(area);
-    block.render(area, buffer);
-
-    let item_width = usize::from(inner_area.width).saturating_sub(HIGHLIGHT_SYMBOL_WIDTH);
+    let item_width = usize::from(block.inner(area).width).saturating_sub(HIGHLIGHT_SYMBOL_WIDTH);
     let items = intervals
         .iter()
-        .enumerate()
-        .map(|(index, interval)| {
-            interval_item(
-                interval,
-                index == selected,
-                item_width,
-                usize::from(inner_area.height),
-                context_offset,
-            )
-        })
+        .map(|interval| ListItem::new(interval_line(interval, item_width)))
         .collect::<Vec<_>>();
-
     let list = List::new(items)
+        .block(block)
         .highlight_symbol(HIGHLIGHT_SYMBOL)
         .highlight_spacing(HighlightSpacing::Always)
-        .scroll_padding(0);
+        .highlight_style(
+            Style::new()
+                .bg(theme::SELECTED_BACKGROUND)
+                .fg(theme::PRIMARY_TEXT)
+                .add_modifier(Modifier::BOLD),
+        )
+        .scroll_padding(1);
 
-    StatefulWidget::render(list, inner_area, buffer, state);
+    StatefulWidget::render(list, area, buffer, state);
 }
 
-fn interval_item(
-    interval: &CalendarInterval,
-    selected: bool,
-    width: usize,
-    maximum_height: usize,
+fn render_details(
+    intervals: &[CalendarInterval],
+    selected: Option<usize>,
     context_offset: usize,
-) -> ListItem<'static> {
-    let mut lines = interval_summary(interval, selected, width);
-
-    if selected {
-        let available_detail_lines = maximum_height.saturating_sub(lines.len());
-        lines.extend(interval_details(
-            interval,
-            available_detail_lines,
-            context_offset,
-        ));
-    }
-
-    ListItem::new(Text::from(lines))
-}
-
-fn interval_summary(
-    interval: &CalendarInterval,
-    selected: bool,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let start: DateTime<Local> = interval.start.into();
-    let finish: DateTime<Local> = interval.finish.into();
-    let time_label = format!("{}–{}", start.format("%H:%M"), finish.format("%H:%M"));
-    let time_style = if selected {
-        Style::new().add_modifier(Modifier::BOLD)
-    } else {
-        Style::new()
+    focus: Focus,
+    area: Rect,
+    buffer: &mut Buffer,
+) {
+    let Some(interval) = selected.and_then(|selected| intervals.get(selected)) else {
+        Paragraph::new("Select an interval to see its details.")
+            .alignment(Alignment::Center)
+            .style(Style::new().fg(theme::SECONDARY_TEXT))
+            .block(pane_block("Details", focus == Focus::Details))
+            .render(area, buffer);
+        return;
     };
 
-    if width >= INLINE_TIMELINE_MINIMUM_WIDTH {
-        let timeline_width = width.saturating_sub(TIME_LABEL_WIDTH + 4);
-        let mut spans = vec![Span::styled(time_label, time_style), Span::raw("  ▕")];
-        spans.extend(timeline_spans(interval, timeline_width));
-        spans.push(Span::raw("▏"));
+    let start: DateTime<Local> = interval.start.into();
+    let finish: DateTime<Local> = interval.finish.into();
+    let title = format!(
+        "Details · {}–{}",
+        start.format("%H:%M"),
+        finish.format("%H:%M")
+    );
+    let mut block = pane_block(&title, focus == Focus::Details);
+    let inner_area = block.inner(area);
 
-        vec![Line::from(spans)]
-    } else {
-        let timeline_width = width.saturating_sub(2);
-        let mut timeline = vec![Span::raw("▕")];
-        timeline.extend(timeline_spans(interval, timeline_width));
-        timeline.push(Span::raw("▏"));
-
-        vec![Line::styled(time_label, time_style), Line::from(timeline)]
-    }
-}
-
-fn interval_details(
-    interval: &CalendarInterval,
-    available_lines: usize,
-    context_offset: usize,
-) -> Vec<Line<'static>> {
-    if available_lines == 0 || interval.contexts.is_empty() {
-        return vec![];
+    if interval.contexts.is_empty() {
+        Paragraph::new("No observed contexts in this interval.")
+            .alignment(Alignment::Center)
+            .style(Style::new().fg(theme::SECONDARY_TEXT))
+            .block(block)
+            .render(area, buffer);
+        return;
     }
 
     let context_offset = context_offset.min(interval.contexts.len() - 1);
-    let show_earlier_contexts = context_offset > 0 && available_lines >= 2;
-    let context_line_capacity = available_lines - usize::from(show_earlier_contexts);
-    let remaining_context_count = interval.contexts.len() - context_offset;
-    let show_later_contexts =
-        remaining_context_count > context_line_capacity && context_line_capacity >= 2;
-    let visible_context_count =
-        remaining_context_count.min(context_line_capacity - usize::from(show_later_contexts));
-    let hidden_later_context_count = remaining_context_count - visible_context_count;
-
-    let mut lines = Vec::new();
-
-    if show_earlier_contexts {
-        lines.push(hidden_contexts_line(
-            format!("… {context_offset} earlier"),
-            false,
-        ));
-    }
-
-    lines.extend(
-        interval
-            .contexts
-            .iter()
-            .skip(context_offset)
-            .take(visible_context_count)
-            .enumerate()
-            .map(|(index, context)| {
-                let is_last_line = !show_later_contexts && index + 1 == visible_context_count;
-                interval_detail(context, is_last_line)
-            }),
+    let visible_context_count = usize::from(inner_area.height.saturating_sub(1));
+    let visible_context_finish =
+        (context_offset + visible_context_count).min(interval.contexts.len());
+    block = block.title(
+        Line::from(format!(
+            " {}–{}/{} ",
+            context_offset + 1,
+            visible_context_finish,
+            interval.contexts.len()
+        ))
+        .alignment(Alignment::Right)
+        .style(Style::new().fg(theme::DIM_TEXT)),
     );
 
-    if show_later_contexts {
-        lines.push(hidden_contexts_line(
-            format!("… {hidden_later_context_count} more"),
-            true,
-        ));
-    }
+    let rows = interval
+        .contexts
+        .iter()
+        .skip(context_offset)
+        .map(|context| {
+            Row::new([
+                Cell::from(Span::styled(
+                    format_duration(context.duration),
+                    Style::new()
+                        .fg(color_for_executable(&context.executable))
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(context.executable.as_str()),
+                Cell::from(context.description.as_str()),
+            ])
+            .style(Style::new().fg(theme::PRIMARY_TEXT))
+        });
+    let header = Row::new(["Time", "Application", "Context"]).style(
+        Style::new()
+            .fg(theme::SECONDARY_TEXT)
+            .add_modifier(Modifier::BOLD),
+    );
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(22),
+            Constraint::Fill(1),
+        ],
+    )
+    .header(header)
+    .column_spacing(2)
+    .block(block);
 
-    lines
+    Widget::render(table, area, buffer);
 }
 
-fn hidden_contexts_line(label: String, is_last: bool) -> Line<'static> {
-    let branch = if is_last { "  └─ " } else { "  ├─ " };
+fn pane_block(title: &str, focused: bool) -> Block<'static> {
+    let border_color = if focused {
+        theme::FOCUS
+    } else {
+        theme::INACTIVE_BORDER
+    };
+    let title = if focused {
+        format!(" {title} · focused ")
+    } else {
+        format!(" {title} ")
+    };
 
-    Line::from(vec![
-        Span::styled(branch, Style::new().add_modifier(Modifier::DIM)),
-        Span::styled(label, Style::new().add_modifier(Modifier::DIM)),
-    ])
-}
-
-fn interval_detail(context: &CalendarIntervalContext, is_last: bool) -> Line<'static> {
-    let branch = if is_last { "  └─ " } else { "  ├─ " };
-
-    Line::from(vec![
-        Span::styled(branch, Style::new().add_modifier(Modifier::DIM)),
-        Span::styled(
-            format_duration(context.duration),
+    Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(border_color))
+        .style(
             Style::new()
-                .fg(color_for_executable(&context.executable))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "  {} · {}",
-            context.executable, context.description
-        )),
-    ])
+                .bg(theme::PANEL_BACKGROUND)
+                .fg(theme::PRIMARY_TEXT),
+        )
+        .title(Span::styled(title, Style::new().fg(border_color)))
+}
+
+fn interval_line(interval: &CalendarInterval, width: usize) -> Line<'static> {
+    let start: DateTime<Local> = interval.start.into();
+    let finish: DateTime<Local> = interval.finish.into();
+    let time_label = format!("{}–{}", start.format("%H:%M"), finish.format("%H:%M"));
+    let timeline_width = width.saturating_sub(TIME_LABEL_WIDTH + 4);
+    let mut spans = vec![
+        Span::styled(time_label, Style::new().fg(theme::SECONDARY_TEXT)),
+        Span::styled("  ▕", Style::new().fg(theme::DIM_TEXT)),
+    ];
+    spans.extend(timeline_spans(interval, timeline_width));
+    spans.push(Span::styled("▏", Style::new().fg(theme::DIM_TEXT)));
+
+    Line::from(spans)
 }
 
 fn timeline_spans(interval: &CalendarInterval, width: usize) -> Vec<Span<'static>> {
@@ -231,8 +241,8 @@ fn timeline_spans(interval: &CalendarInterval, width: usize) -> Vec<Span<'static
 
     let mut spans = Vec::new();
     let mut cursor = 0;
-
     let mut observed_nanoseconds = 0;
+
     for context in &interval.contexts {
         observed_nanoseconds =
             (observed_nanoseconds + context.duration.as_nanos()).min(total_nanoseconds);
@@ -240,12 +250,10 @@ fn timeline_spans(interval: &CalendarInterval, width: usize) -> Vec<Span<'static
         let segment_width = finish_column.saturating_sub(cursor);
 
         if segment_width > 0 {
-            let color = color_for_executable(&context.executable);
             spans.push(Span::styled(
                 "━".repeat(segment_width),
-                Style::new().fg(color),
+                Style::new().fg(color_for_executable(&context.executable)),
             ));
-
             cursor = finish_column;
         }
     }
@@ -258,19 +266,26 @@ fn timeline_spans(interval: &CalendarInterval, width: usize) -> Vec<Span<'static
 }
 
 fn unobserved_span(width: usize) -> Span<'static> {
-    Span::styled("─".repeat(width), Style::new().add_modifier(Modifier::DIM))
+    Span::styled("─".repeat(width), Style::new().fg(theme::DIM_TEXT))
 }
 
-fn color_for_executable(executable: &str) -> Color {
-    let hash = executable
+fn color_for_executable(executable: &str) -> ratatui::style::Color {
+    let mut hash = executable
         .bytes()
         .map(|byte| byte.to_ascii_lowercase())
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
 
-    let palette_index = (hash % APPLICATION_COLORS.len() as u64) as usize;
-    APPLICATION_COLORS[palette_index]
+    hash ^= hash >> 30;
+    hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    hash ^= hash >> 27;
+    hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+    hash ^= hash >> 31;
+
+    let palette_index = (hash % theme::APPLICATION_COLORS.len() as u64) as usize;
+
+    theme::APPLICATION_COLORS[palette_index]
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -287,8 +302,9 @@ mod tests {
     use ratatui::text::Line;
     use ratatui::widgets::ListState;
 
-    use super::{APPLICATION_COLORS, color_for_executable, render, timeline_spans};
+    use super::{color_for_executable, render, timeline_spans};
     use crate::calendar::{CalendarInterval, CalendarIntervalContext};
+    use crate::tui::{Focus, theme};
 
     #[test]
     fn executable_color_is_stable_and_case_insensitive() {
@@ -299,190 +315,145 @@ mod tests {
     }
 
     #[test]
-    fn executable_color_comes_from_the_application_palette() {
-        assert!(APPLICATION_COLORS.contains(&color_for_executable("idea64.exe")));
-    }
+    fn application_palette_contains_sixteen_distinct_colors() {
+        assert_eq!(theme::APPLICATION_COLORS.len(), 16);
 
-    #[test]
-    fn application_palette_contains_ten_distinct_colors() {
-        assert_eq!(APPLICATION_COLORS.len(), 10);
-
-        for (index, color) in APPLICATION_COLORS.iter().enumerate() {
-            assert!(!APPLICATION_COLORS[..index].contains(color));
+        for (index, color) in theme::APPLICATION_COLORS.iter().enumerate() {
+            assert!(!theme::APPLICATION_COLORS[..index].contains(color));
         }
     }
 
     #[test]
-    fn timeline_uses_the_complete_available_width() {
-        let interval = interval(vec![interval_context(300, "idea64.exe")]);
-        let line = Line::from(timeline_spans(&interval, 17));
+    fn common_applications_are_distributed_across_the_palette() {
+        let executables = [
+            "WindowsTerminal.exe",
+            "ms-teams.exe",
+            "Bruno.exe",
+            "Notepad.exe",
+            "msedge.exe",
+            "idea64.exe",
+            "Code.exe",
+        ];
+        let colors = executables.map(color_for_executable);
 
-        assert_eq!(line.width(), 17);
+        for (index, color) in colors.iter().enumerate() {
+            assert!(!colors[..index].contains(color));
+        }
     }
 
     #[test]
-    fn timeline_represents_proportional_contexts() {
+    fn timeline_represents_contexts_and_unobserved_time_proportionally() {
         let interval = interval(vec![
-            interval_context(180, "idea64.exe"),
-            interval_context(120, "msedge.exe"),
+            interval_context(180, "idea64.exe", "Context A"),
+            interval_context(60, "msedge.exe", "Context B"),
         ]);
         let spans = timeline_spans(&interval, 10);
 
         assert_eq!(spans[0].content, "━━━━━━");
-        assert_eq!(spans[1].content, "━━━━");
+        assert_eq!(spans[1].content, "━━");
+        assert_eq!(spans[2].content, "──");
         assert_eq!(Line::from(spans).width(), 10);
     }
 
     #[test]
-    fn timeline_renders_unobserved_time_as_a_gap() {
-        let interval = interval(vec![interval_context(60, "idea64.exe")]);
-        let spans = timeline_spans(&interval, 10);
+    fn renders_interval_list_and_selected_interval_details_in_separate_panes() {
+        let intervals = vec![interval(vec![
+            interval_context(180, "idea64.exe", "MBFSNL-11923"),
+            interval_context(120, "msedge.exe", "Pull request"),
+        ])];
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
 
-        assert_eq!(spans[0].content, "━━");
-        assert_eq!(spans[1].content, "────────");
-        assert_eq!(Line::from(spans).width(), 10);
+        let panes = render(
+            "5-minute intervals",
+            &intervals,
+            &mut state,
+            0,
+            Focus::Intervals,
+            area,
+            &mut buffer,
+        );
+        let rendered = rendered_text(&buffer);
+
+        assert!(rendered.contains("5-minute intervals · focused"));
+        assert!(rendered.contains("Details ·"));
+        assert!(rendered.contains("idea64.exe"));
+        assert!(rendered.contains("MBFSNL-11923"));
+        assert!(panes.intervals.bottom() < panes.details.top());
+        assert_eq!(
+            buffer[(panes.intervals.x, panes.intervals.y)].fg,
+            theme::FOCUS
+        );
+        assert_eq!(
+            buffer[(panes.details.x, panes.details.y)].fg,
+            theme::INACTIVE_BORDER
+        );
     }
 
     #[test]
-    fn sub_cell_activity_does_not_make_the_timeline_too_wide() {
-        let interval = interval(vec![interval_context(1, "idea64.exe")]);
-        let line = Line::from(timeline_spans(&interval, 10));
+    fn detail_offset_controls_the_first_visible_context() {
+        let intervals = vec![interval(vec![
+            interval_context(100, "first.exe", "First"),
+            interval_context(100, "second.exe", "Second"),
+            interval_context(100, "third.exe", "Third"),
+        ])];
+        let area = Rect::new(0, 0, 80, 14);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
 
-        assert_eq!(line.width(), 10);
+        render(
+            "5-minute intervals",
+            &intervals,
+            &mut state,
+            1,
+            Focus::Details,
+            area,
+            &mut buffer,
+        );
+        let rendered = rendered_text(&buffer);
+
+        assert!(!rendered.contains("first.exe"));
+        assert!(rendered.contains("second.exe"));
+        assert!(rendered.contains("third.exe"));
+        assert!(rendered.contains("Details ·"));
     }
 
     #[test]
-    fn empty_interval_view_has_no_selection() {
-        let area = Rect::new(0, 0, 40, 5);
+    fn empty_intervals_render_both_panes_without_a_selection() {
+        let area = Rect::new(0, 0, 60, 14);
         let mut buffer = Buffer::empty(area);
         let mut state = ListState::default().with_selected(Some(2));
 
-        render("5-minute intervals", &[], &mut state, 0, area, &mut buffer);
+        render(
+            "5-minute intervals",
+            &[],
+            &mut state,
+            0,
+            Focus::Intervals,
+            area,
+            &mut buffer,
+        );
+        let rendered = rendered_text(&buffer);
 
         assert_eq!(state.selected(), None);
-        let line = rendered_line(&buffer, 1);
-        assert!(line.contains("No 5-minute intervals yet."), "{line:?}");
-    }
-
-    #[test]
-    fn narrow_layout_moves_the_timeline_below_the_time_label() {
-        let intervals = vec![interval(vec![interval_context(300, "idea64.exe")])];
-        let area = Rect::new(0, 0, 24, 6);
-        let mut buffer = Buffer::empty(area);
-        let mut state = ListState::default().with_selected(Some(0));
-
-        render(
-            "5-minute intervals",
-            &intervals,
-            &mut state,
-            0,
-            area,
-            &mut buffer,
-        );
-
-        assert!(rendered_line(&buffer, 1).contains('–'));
-        assert!(rendered_line(&buffer, 2).contains("▕━━━━━━━━━━━━━━━━━━▏"));
-        let detail = rendered_line(&buffer, 3);
-        assert!(detail.contains("05:00"), "{detail:?}");
-    }
-
-    #[test]
-    fn selected_interval_summarizes_contexts_that_do_not_fit() {
-        let intervals = vec![interval(vec![
-            interval_context(100, "idea64.exe"),
-            interval_context(100, "msedge.exe"),
-            interval_context(100, "WindowsTerminal.exe"),
-        ])];
-        let area = Rect::new(0, 0, 60, 5);
-        let mut buffer = Buffer::empty(area);
-        let mut state = ListState::default().with_selected(Some(0));
-
-        render(
-            "5-minute intervals",
-            &intervals,
-            &mut state,
-            0,
-            area,
-            &mut buffer,
-        );
-
-        assert!(rendered_line(&buffer, 2).contains("idea64.exe"));
-        assert!(rendered_line(&buffer, 3).contains("… 2 more"));
-    }
-
-    #[test]
-    fn selected_interval_is_the_first_visible_interval() {
-        let intervals = vec![
-            interval_with_start(0, "first.exe"),
-            interval_with_start(300, "selected.exe"),
-            interval_with_start(600, "following.exe"),
-        ];
-        let area = Rect::new(0, 0, 60, 7);
-        let mut buffer = Buffer::empty(area);
-        let mut state = ListState::default().with_selected(Some(1));
-
-        render(
-            "5-minute intervals",
-            &intervals,
-            &mut state,
-            0,
-            area,
-            &mut buffer,
-        );
-
-        assert_eq!(state.offset(), 1);
-        assert!(rendered_line(&buffer, 2).contains("selected.exe"));
-        assert!(rendered_line(&buffer, 3).contains('–'));
-        assert!(!rendered_text(&buffer).contains("first.exe"));
-    }
-
-    #[test]
-    fn context_offset_reveals_later_contexts() {
-        let intervals = vec![interval(vec![
-            interval_context(60, "first.exe"),
-            interval_context(60, "second.exe"),
-            interval_context(60, "selected.exe"),
-            interval_context(60, "fourth.exe"),
-            interval_context(60, "fifth.exe"),
-        ])];
-        let area = Rect::new(0, 0, 60, 6);
-        let mut buffer = Buffer::empty(area);
-        let mut state = ListState::default().with_selected(Some(0));
-
-        render(
-            "5-minute intervals",
-            &intervals,
-            &mut state,
-            2,
-            area,
-            &mut buffer,
-        );
-
-        let rendered = rendered_text(&buffer);
-        assert!(rendered.contains("… 2 earlier"));
-        assert!(rendered.contains("selected.exe"));
-        assert!(rendered.contains("… 2 more"));
-        assert!(!rendered.contains("first.exe"));
+        assert!(rendered.contains("No 5-minute intervals yet."));
+        assert!(rendered.contains("Select an interval to see its details."));
     }
 
     fn interval(contexts: Vec<CalendarIntervalContext>) -> CalendarInterval {
         CalendarInterval::new(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(300), contexts)
     }
 
-    fn interval_with_start(start_seconds: u64, executable: &str) -> CalendarInterval {
-        let start = UNIX_EPOCH + Duration::from_secs(start_seconds);
-        CalendarInterval::new(
-            start,
-            start + Duration::from_secs(300),
-            vec![interval_context(300, executable)],
-        )
-    }
-
-    fn interval_context(duration_seconds: u64, executable: &str) -> CalendarIntervalContext {
+    fn interval_context(
+        duration_seconds: u64,
+        executable: &str,
+        description: &str,
+    ) -> CalendarIntervalContext {
         CalendarIntervalContext::new(
             Duration::from_secs(duration_seconds),
             executable.to_owned(),
-            "Context".to_owned(),
+            description.to_owned(),
         )
     }
 

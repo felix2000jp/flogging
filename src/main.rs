@@ -3,10 +3,14 @@ mod collectors;
 mod events;
 mod tui;
 
+use std::io;
+
 #[cfg(target_os = "windows")]
 use crate::collectors::windows::WindowsCollector;
 use crate::{events::store::EventStore, tui::App};
 use anyhow::{Context, Result};
+use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use ratatui::crossterm::execute;
 
 fn main() -> Result<()> {
     let executable_path =
@@ -22,5 +26,23 @@ fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     let _collector = WindowsCollector::start(store.clone());
 
-    ratatui::run(|terminal| app.run(terminal))
+    ratatui::run(|terminal| {
+        let _mouse_capture = MouseCapture::enable().context("could not enable mouse controls")?;
+        app.run(terminal)
+    })
+}
+
+struct MouseCapture;
+
+impl MouseCapture {
+    fn enable() -> io::Result<Self> {
+        execute!(io::stdout(), EnableMouseCapture)?;
+        Ok(Self)
+    }
+}
+
+impl Drop for MouseCapture {
+    fn drop(&mut self) {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+    }
 }

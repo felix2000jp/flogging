@@ -1,6 +1,7 @@
 mod calendar;
 mod collectors;
 mod events;
+pub mod suggestions;
 mod tui;
 
 use std::io;

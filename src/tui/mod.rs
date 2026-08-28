@@ -66,7 +66,7 @@ impl App {
         let mut app = Self {
             store,
             selected_date,
-            calendar: Calendar::new(selected_date, &[]),
+            calendar: Calendar::new(selected_date, &[], &[]),
             calendar_view: CalendarView::FiveMinuteIntervals,
             focus: Focus::Intervals,
             interval_list_state: ListState::default(),
@@ -193,7 +193,7 @@ impl App {
             })?;
 
         let events = self.store.events_between(start.into(), end.into())?;
-        self.calendar = Calendar::new(self.selected_date, &events);
+        self.calendar = Calendar::new(self.selected_date, &events, &[]);
         self.clamp_navigation();
         self.refresh_at = Instant::now() + CALENDAR_REFRESH_INTERVAL;
 

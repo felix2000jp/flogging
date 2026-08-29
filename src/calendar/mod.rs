@@ -1,14 +1,16 @@
 mod foreground_window;
 mod interval;
+mod suggestion;
 
 use std::time::{Duration, SystemTime};
 
 use chrono::NaiveDate;
 
 use crate::events::Event;
-use crate::suggestions::Suggestion;
+use crate::suggestions::{Suggestion, SuggestionSet};
 use foreground_window::build_foreground_window_blocks;
 use interval::build_intervals;
+use suggestion::enrich_intervals;
 
 const FIVE_MINUTES: Duration = Duration::from_secs(5 * 60);
 const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
@@ -22,23 +24,16 @@ pub struct Calendar {
 }
 
 impl Calendar {
-    pub fn new(date: NaiveDate, events: &[Event], suggestions: &[Suggestion]) -> Self {
+    pub fn new(date: NaiveDate, events: &[Event], suggestions: &SuggestionSet) -> Self {
         let blocks = build_foreground_window_blocks(events);
-        let mut five_minute_intervals = build_intervals(&blocks, FIVE_MINUTES);
-        let mut fifteen_minute_intervals = build_intervals(&blocks, FIFTEEN_MINUTES);
-
-        for interval in five_minute_intervals
-            .iter_mut()
-            .chain(&mut fifteen_minute_intervals)
-        {
-            interval.suggestion = suggestions
-                .iter()
-                .find(|suggestion| {
-                    suggestion.interval_start == interval.start
-                        && suggestion.interval_finish == interval.finish
-                })
-                .cloned();
-        }
+        let five_minute_intervals = enrich_intervals(
+            build_intervals(&blocks, FIVE_MINUTES),
+            &suggestions.five_minute_suggestions,
+        );
+        let fifteen_minute_intervals = enrich_intervals(
+            build_intervals(&blocks, FIFTEEN_MINUTES),
+            &suggestions.fifteen_minute_suggestions,
+        );
 
         Self {
             date,
@@ -118,7 +113,7 @@ mod tests {
 
     use super::{Calendar, CalendarBlock, CalendarInterval, CalendarIntervalContext};
     use crate::events::Event;
-    use crate::suggestions::Suggestion;
+    use crate::suggestions::{Suggestion, SuggestionSet};
 
     #[test]
     fn builds_a_calendar_for_the_requested_date() {
@@ -135,7 +130,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let calendar = Calendar::new(date, &events, &[]);
+        let calendar = Calendar::new(date, &events, &SuggestionSet::new(vec![], vec![]));
 
         assert_eq!(calendar.date, date);
         assert_eq!(
@@ -204,10 +199,10 @@ mod tests {
         let calendar = Calendar::new(
             date,
             &events,
-            &[
-                five_minute_suggestion.clone(),
-                fifteen_minute_suggestion.clone(),
-            ],
+            &SuggestionSet::new(
+                vec![five_minute_suggestion.clone()],
+                vec![fifteen_minute_suggestion.clone()],
+            ),
         );
 
         assert_eq!(
@@ -230,7 +225,7 @@ mod tests {
             Some("MBFS-1234".to_owned()),
         );
 
-        let calendar = Calendar::new(date, &[], &[suggestion]);
+        let calendar = Calendar::new(date, &[], &SuggestionSet::new(vec![suggestion], vec![]));
 
         assert!(calendar.five_minute_intervals.is_empty());
         assert!(calendar.fifteen_minute_intervals.is_empty());

@@ -1,5 +1,6 @@
 SELECT interval_start,
        interval_finish,
+       interval_duration,
        generated_at,
        jira_issue_key
 FROM suggestions

@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, Borders, ListState, Paragraph, Widget};
 
 use crate::calendar::{Calendar, CalendarInterval};
 use crate::events::store::EventStore;
+use crate::suggestions::SuggestionSet;
 
 const CALENDAR_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -66,7 +67,7 @@ impl App {
         let mut app = Self {
             store,
             selected_date,
-            calendar: Calendar::new(selected_date, &[], &[]),
+            calendar: Calendar::new(selected_date, &[], &SuggestionSet::new(vec![], vec![])),
             calendar_view: CalendarView::FiveMinuteIntervals,
             focus: Focus::Intervals,
             interval_list_state: ListState::default(),
@@ -193,7 +194,11 @@ impl App {
             })?;
 
         let events = self.store.events_between(start.into(), end.into())?;
-        self.calendar = Calendar::new(self.selected_date, &events, &[]);
+        self.calendar = Calendar::new(
+            self.selected_date,
+            &events,
+            &SuggestionSet::new(vec![], vec![]),
+        );
         self.clamp_navigation();
         self.refresh_at = Instant::now() + CALENDAR_REFRESH_INTERVAL;
 

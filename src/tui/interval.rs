@@ -6,7 +6,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, HighlightSpacing, List, ListItem, ListState, Paragraph, Row,
+    Block, Borders, Cell, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph, Row,
     StatefulWidget, Table, Widget,
 };
 
@@ -16,6 +16,8 @@ use crate::calendar::CalendarInterval;
 const HIGHLIGHT_SYMBOL: &str = "› ";
 const HIGHLIGHT_SYMBOL_WIDTH: usize = 2;
 const TIME_LABEL_WIDTH: usize = 11;
+pub(super) const INTERVAL_ITEM_HEIGHT: usize = 2;
+pub(super) const INTERVAL_TOP_PADDING: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PaneAreas {
@@ -61,7 +63,12 @@ fn render_intervals(
     area: Rect,
     buffer: &mut Buffer,
 ) {
-    let block = pane_block(title, focus == Focus::Intervals);
+    let block = pane_block(title, focus == Focus::Intervals).padding(Padding::new(
+        1,
+        1,
+        INTERVAL_TOP_PADDING,
+        0,
+    ));
 
     if intervals.is_empty() {
         state.select(None);
@@ -81,7 +88,7 @@ fn render_intervals(
     let item_width = usize::from(block.inner(area).width).saturating_sub(HIGHLIGHT_SYMBOL_WIDTH);
     let items = intervals
         .iter()
-        .map(|interval| ListItem::new(interval_line(interval, item_width)))
+        .map(|interval| ListItem::new(vec![interval_line(interval, item_width), Line::default()]))
         .collect::<Vec<_>>();
     let list = List::new(items)
         .block(block)
@@ -90,7 +97,6 @@ fn render_intervals(
         .highlight_style(
             Style::new()
                 .bg(theme::SELECTED_BACKGROUND)
-                .fg(theme::PRIMARY_TEXT)
                 .add_modifier(Modifier::BOLD),
         )
         .scroll_padding(1);
@@ -135,7 +141,9 @@ fn render_details(
     }
 
     let context_offset = context_offset.min(interval.contexts.len() - 1);
-    let visible_context_count = usize::from(inner_area.height.saturating_sub(1));
+    let header_spacing = u16::from(inner_area.height >= 5);
+    let header_height = 1 + header_spacing * 2;
+    let visible_context_count = usize::from(inner_area.height.saturating_sub(header_height));
     let visible_context_finish =
         (context_offset + visible_context_count).min(interval.contexts.len());
     block = block.title(
@@ -166,11 +174,10 @@ fn render_details(
             ])
             .style(Style::new().fg(theme::PRIMARY_TEXT))
         });
-    let header = Row::new(["Time", "Application", "Context"]).style(
-        Style::new()
-            .fg(theme::SECONDARY_TEXT)
-            .add_modifier(Modifier::BOLD),
-    );
+    let header = Row::new(["Time", "Application", "Context"])
+        .top_margin(header_spacing)
+        .bottom_margin(header_spacing)
+        .style(Style::new().fg(theme::FOCUS).add_modifier(Modifier::BOLD));
     let table = Table::new(
         rows,
         [
@@ -200,6 +207,7 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
 
     Block::new()
         .borders(Borders::ALL)
+        .padding(Padding::horizontal(1))
         .border_style(Style::new().fg(border_color))
         .style(
             Style::new()
@@ -392,6 +400,62 @@ mod tests {
     }
 
     #[test]
+    fn selected_interval_retains_its_application_colors() {
+        let executable = "idea64.exe";
+        let intervals = vec![interval(vec![interval_context(
+            300,
+            executable,
+            "MBFSNL-11923",
+        )])];
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        let panes = render(
+            "5-minute intervals",
+            &intervals,
+            &mut state,
+            0,
+            Focus::Intervals,
+            area,
+            &mut buffer,
+        );
+        let timeline_cell = (panes.intervals.x..panes.intervals.right())
+            .map(|x| &buffer[(x, panes.intervals.y + 2)])
+            .find(|cell| cell.symbol() == "━")
+            .expect("the selected interval should contain a timeline");
+
+        assert_eq!(timeline_cell.fg, color_for_executable(executable));
+        assert_eq!(timeline_cell.bg, theme::SELECTED_BACKGROUND);
+    }
+
+    #[test]
+    fn interval_rows_are_separated_by_an_empty_line() {
+        let intervals = vec![
+            interval(vec![interval_context(300, "first.exe", "First")]),
+            interval(vec![interval_context(300, "second.exe", "Second")]),
+        ];
+        let area = Rect::new(0, 0, 80, 14);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        let panes = render(
+            "5-minute intervals",
+            &intervals,
+            &mut state,
+            0,
+            Focus::Intervals,
+            area,
+            &mut buffer,
+        );
+
+        assert!(!rendered_line(&buffer, panes.intervals.y + 1).contains('–'));
+        assert!(rendered_line(&buffer, panes.intervals.y + 2).contains('–'));
+        assert!(!rendered_line(&buffer, panes.intervals.y + 3).contains('–'));
+        assert!(rendered_line(&buffer, panes.intervals.y + 4).contains('–'));
+    }
+
+    #[test]
     fn detail_offset_controls_the_first_visible_context() {
         let intervals = vec![interval(vec![
             interval_context(100, "first.exe", "First"),
@@ -417,6 +481,42 @@ mod tests {
         assert!(rendered.contains("second.exe"));
         assert!(rendered.contains("third.exe"));
         assert!(rendered.contains("Details ·"));
+    }
+
+    #[test]
+    fn details_header_is_accented_and_separated_from_contexts() {
+        let intervals = vec![interval(vec![interval_context(
+            300,
+            "idea64.exe",
+            "MBFSNL-11923",
+        )])];
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        let panes = render(
+            "5-minute intervals",
+            &intervals,
+            &mut state,
+            0,
+            Focus::Details,
+            area,
+            &mut buffer,
+        );
+        let top_spacing = rendered_line(&buffer, panes.details.y + 1);
+        let header = rendered_line(&buffer, panes.details.y + 2);
+        let bottom_spacing = rendered_line(&buffer, panes.details.y + 3);
+        let first_context = rendered_line(&buffer, panes.details.y + 4);
+        let header_cell = (panes.details.x..panes.details.right())
+            .map(|x| &buffer[(x, panes.details.y + 2)])
+            .find(|cell| cell.symbol() == "T")
+            .expect("the details table should render its header");
+
+        assert!(!top_spacing.contains("Time"));
+        assert!(header.contains("Time"));
+        assert!(!bottom_spacing.contains("idea64.exe"));
+        assert!(first_context.contains("idea64.exe"));
+        assert_eq!(header_cell.fg, theme::FOCUS);
     }
 
     #[test]

@@ -291,14 +291,18 @@ impl App {
         }
 
         self.focus = Focus::Intervals;
-        let first_row = self.interval_pane_area.y.saturating_add(1);
+        let first_row = self
+            .interval_pane_area
+            .y
+            .saturating_add(1 + interval::INTERVAL_TOP_PADDING);
         let last_row = self.interval_pane_area.bottom().saturating_sub(1);
 
         if row < first_row || row >= last_row {
             return;
         }
 
-        let clicked = self.interval_list_state.offset() + usize::from(row - first_row);
+        let clicked = self.interval_list_state.offset()
+            + usize::from(row - first_row) / interval::INTERVAL_ITEM_HEIGHT;
         if clicked < self.current_intervals().len() {
             self.interval_list_state.select(Some(clicked));
             self.interval_context_offset = 0;
@@ -401,7 +405,7 @@ impl Widget for &mut App {
                 hint(": focus  "),
                 key("↑/↓"),
                 hint(": move  "),
-                key("v"),
+                key("V"),
                 hint(": 5m/15m  "),
                 key("←/→"),
                 hint(": day  "),
@@ -711,7 +715,7 @@ mod tests {
 
         app.handle_action(Action::MouseClick {
             column: app.interval_pane_area.x + 2,
-            row: app.interval_pane_area.y + 2,
+            row: app.interval_pane_area.y + 4,
         })
         .unwrap();
 

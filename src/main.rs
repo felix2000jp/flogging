@@ -8,7 +8,7 @@ use std::io;
 
 #[cfg(target_os = "windows")]
 use crate::collectors::windows::WindowsCollector;
-use crate::{events::store::EventStore, tui::App};
+use crate::{events::store::EventStore, suggestions::store::SuggestionStore, tui::App};
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
@@ -21,11 +21,12 @@ fn main() -> Result<()> {
         .context("flogging executable does not have a parent directory")?;
 
     let database_path = executable_directory.join("flogging.db");
-    let store = EventStore::build(&database_path)?;
-    let mut app = App::new(store.clone())?;
+    let event_store = EventStore::build(&database_path)?;
+    let suggestion_store = SuggestionStore::build(&database_path)?;
+    let mut app = App::new(event_store.clone(), suggestion_store)?;
 
     #[cfg(target_os = "windows")]
-    let _collector = WindowsCollector::start(store.clone());
+    let _collector = WindowsCollector::start(event_store);
 
     ratatui::run(|terminal| {
         let _mouse_capture = MouseCapture::enable().context("could not enable mouse controls")?;

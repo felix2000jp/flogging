@@ -16,12 +16,13 @@ use ratatui::widgets::{Block, Borders, ListState, Paragraph, Widget};
 
 use crate::calendar::{Calendar, CalendarInterval};
 use crate::events::store::EventStore;
-use crate::suggestions::SuggestionSet;
+use crate::suggestions::{SuggestionSet, store::SuggestionStore};
 
 const CALENDAR_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub struct App {
-    store: EventStore,
+    event_store: EventStore,
+    suggestion_store: SuggestionStore,
     selected_date: NaiveDate,
     calendar: Calendar,
     calendar_view: CalendarView,
@@ -62,10 +63,11 @@ enum CalendarView {
 }
 
 impl App {
-    pub fn new(store: EventStore) -> Result<Self> {
+    pub fn new(event_store: EventStore, suggestion_store: SuggestionStore) -> Result<Self> {
         let selected_date = Local::now().date_naive();
         let mut app = Self {
-            store,
+            event_store,
+            suggestion_store,
             selected_date,
             calendar: Calendar::new(selected_date, &[], &SuggestionSet::new(vec![], vec![])),
             calendar_view: CalendarView::FiveMinuteIntervals,
@@ -193,12 +195,11 @@ impl App {
                 )
             })?;
 
-        let events = self.store.events_between(start.into(), end.into())?;
-        self.calendar = Calendar::new(
-            self.selected_date,
-            &events,
-            &SuggestionSet::new(vec![], vec![]),
-        );
+        let events = self.event_store.events_between(start.into(), end.into())?;
+        let suggestions = self
+            .suggestion_store
+            .suggestions_between(start.into(), end.into())?;
+        self.calendar = Calendar::new(self.selected_date, &events, &suggestions);
         self.clamp_navigation();
         self.refresh_at = Instant::now() + CALENDAR_REFRESH_INTERVAL;
 
@@ -487,9 +488,9 @@ fn action_for_event(event: Event) -> Option<Action> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration as StdDuration, Instant, UNIX_EPOCH};
+    use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
-    use chrono::{Local, NaiveDate};
+    use chrono::{Local, NaiveDate, TimeZone};
     use ratatui::buffer::Buffer;
     use ratatui::crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
@@ -500,7 +501,10 @@ mod tests {
 
     use super::{Action, App, CalendarView, Focus, action_for_event};
     use crate::calendar::{Calendar, CalendarInterval, CalendarIntervalContext};
+    use crate::events::Event as ActivityEvent;
     use crate::events::store::EventStore;
+    use crate::suggestions::store::SuggestionStore;
+    use crate::suggestions::{Suggestion, SuggestionSet};
     use crate::tui::theme;
 
     #[test]
@@ -728,6 +732,87 @@ mod tests {
     }
 
     #[test]
+    fn calendar_refresh_loads_both_sets_of_stored_suggestions() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let event_store = EventStore::build(":memory:").unwrap();
+        let suggestion_store = SuggestionStore::build(":memory:").unwrap();
+        save_activity(&event_store, date);
+        let five_minute_suggestion = suggestion(date, 5, "MBFS-1234");
+        let fifteen_minute_suggestion = suggestion(date, 15, "MBFS-5678");
+        let (day_start, day_end) = day_bounds(date);
+        suggestion_store
+            .replace_between(
+                day_start,
+                day_end,
+                &SuggestionSet::new(
+                    vec![five_minute_suggestion.clone()],
+                    vec![fifteen_minute_suggestion.clone()],
+                ),
+            )
+            .unwrap();
+        let mut app = app_with_stores(date, event_store, suggestion_store, vec![], vec![]);
+
+        app.refresh_calendar().unwrap();
+        app.refresh_calendar().unwrap();
+
+        assert_eq!(
+            app.calendar.five_minute_intervals[0].suggestion,
+            Some(five_minute_suggestion)
+        );
+        assert_eq!(
+            app.calendar.fifteen_minute_intervals[0].suggestion,
+            Some(fifteen_minute_suggestion)
+        );
+    }
+
+    #[test]
+    fn day_navigation_loads_suggestions_for_the_new_date() {
+        let first_date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let second_date = first_date.succ_opt().unwrap();
+        let event_store = EventStore::build(":memory:").unwrap();
+        let suggestion_store = SuggestionStore::build(":memory:").unwrap();
+        save_activity(&event_store, second_date);
+        let expected = suggestion(second_date, 5, "MBFS-1234");
+        let (day_start, day_end) = day_bounds(second_date);
+        suggestion_store
+            .replace_between(
+                day_start,
+                day_end,
+                &SuggestionSet::new(vec![expected.clone()], vec![]),
+            )
+            .unwrap();
+        let mut app = app_with_stores(first_date, event_store, suggestion_store, vec![], vec![]);
+
+        app.handle_action(Action::NextDay).unwrap();
+
+        assert_eq!(app.calendar.date, second_date);
+        assert_eq!(
+            app.calendar.five_minute_intervals[0].suggestion,
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn calendar_refresh_builds_intervals_when_no_suggestions_are_stored() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let event_store = EventStore::build(":memory:").unwrap();
+        let suggestion_store = SuggestionStore::build(":memory:").unwrap();
+        save_activity(&event_store, date);
+        let mut app = app_with_stores(date, event_store, suggestion_store, vec![], vec![]);
+
+        app.refresh_calendar().unwrap();
+
+        assert_eq!(app.calendar.five_minute_intervals.len(), 1);
+        assert!(app.calendar.five_minute_intervals[0].suggestion.is_none());
+        assert_eq!(app.calendar.fifteen_minute_intervals.len(), 1);
+        assert!(
+            app.calendar.fifteen_minute_intervals[0]
+                .suggestion
+                .is_none()
+        );
+    }
+
+    #[test]
     fn today_action_loads_the_current_date() {
         let before = Local::now().date_naive();
         let mut app = empty_app(before.pred_opt().unwrap());
@@ -757,8 +842,25 @@ mod tests {
         five_minute_intervals: Vec<CalendarInterval>,
         fifteen_minute_intervals: Vec<CalendarInterval>,
     ) -> App {
+        app_with_stores(
+            date,
+            EventStore::build(":memory:").unwrap(),
+            SuggestionStore::build(":memory:").unwrap(),
+            five_minute_intervals,
+            fifteen_minute_intervals,
+        )
+    }
+
+    fn app_with_stores(
+        date: NaiveDate,
+        store: EventStore,
+        suggestion_store: SuggestionStore,
+        five_minute_intervals: Vec<CalendarInterval>,
+        fifteen_minute_intervals: Vec<CalendarInterval>,
+    ) -> App {
         App {
-            store: EventStore::build(":memory:").unwrap(),
+            event_store: store,
+            suggestion_store,
             selected_date: date,
             calendar: Calendar {
                 date,
@@ -775,6 +877,44 @@ mod tests {
             refresh_at: Instant::now(),
             should_quit: false,
         }
+    }
+
+    fn save_activity(store: &EventStore, date: NaiveDate) {
+        for second in [0, 5] {
+            store
+                .save(&ActivityEvent::new_foreground_window_event(
+                    local_time(date, 10, 0, second),
+                    1,
+                    "Context A".to_owned(),
+                    "application-a.exe".to_owned(),
+                    None,
+                ))
+                .unwrap();
+        }
+    }
+
+    fn suggestion(date: NaiveDate, duration_minutes: u64, jira_issue_key: &str) -> Suggestion {
+        Suggestion::new(
+            local_time(date, 10, 0, 0),
+            local_time(date, 10, u32::try_from(duration_minutes).unwrap(), 0),
+            local_time(date, 12, 0, 0),
+            Some(jira_issue_key.to_owned()),
+        )
+    }
+
+    fn day_bounds(date: NaiveDate) -> (SystemTime, SystemTime) {
+        (
+            local_time(date, 0, 0, 0),
+            local_time(date.succ_opt().unwrap(), 0, 0, 0),
+        )
+    }
+
+    fn local_time(date: NaiveDate, hour: u32, minute: u32, second: u32) -> SystemTime {
+        Local
+            .from_local_datetime(&date.and_hms_opt(hour, minute, second).unwrap())
+            .single()
+            .unwrap()
+            .into()
     }
 
     fn interval(contexts: Vec<CalendarIntervalContext>) -> CalendarInterval {

@@ -241,11 +241,17 @@ impl App {
 
         match result {
             Ok(result) => {
-                self.suggestion_store.replace_between(
+                if let Err(error) = self.suggestion_store.replace_between(
                     result.range_start,
                     result.range_finish,
                     &result.suggestions,
-                )?;
+                ) {
+                    self.suggestion_job = SuggestionJob::Failed {
+                        date: result.date,
+                        message: format!("Could not save suggestions: {error:#}"),
+                    };
+                    return Ok(());
+                }
                 self.suggestion_job = SuggestionJob::Idle;
 
                 if result.date == self.selected_date {

@@ -2,7 +2,7 @@ mod agents;
 mod calendar;
 mod collectors;
 mod events;
-pub mod suggestions;
+mod suggestions;
 mod tui;
 
 use std::io;
@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let database_path = executable_directory.join("flogging.db");
     let event_store = EventStore::build(&database_path)?;
     let suggestion_store = SuggestionStore::build(&database_path)?;
-    
+
     let suggestion_agent = SuggestionAgent::new();
 
     #[cfg(target_os = "windows")]

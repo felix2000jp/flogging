@@ -8,6 +8,10 @@ pub(super) const DIM_TEXT: Color = Color::Rgb(86, 95, 137);
 pub(super) const SECONDARY_TEXT: Color = Color::Rgb(169, 177, 214);
 pub(super) const PRIMARY_TEXT: Color = Color::Rgb(192, 202, 245);
 pub(super) const FOCUS: Color = Color::Rgb(122, 162, 247);
+pub(super) const INFO: Color = Color::Rgb(125, 207, 255);
+pub(super) const SUCCESS: Color = Color::Rgb(158, 206, 106);
+pub(super) const WARNING: Color = Color::Rgb(224, 175, 104);
+pub(super) const ERROR: Color = Color::Rgb(247, 118, 142);
 
 pub(super) const APPLICATION_COLORS: [Color; 16] = [
     Color::Rgb(122, 162, 247),

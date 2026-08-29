@@ -2,7 +2,7 @@ mod interval;
 mod theme;
 
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use chrono::{Local, NaiveDate, TimeZone};
@@ -14,15 +14,19 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, ListState, Paragraph, Widget};
 
+use crate::agents::{AgentInterval, AgentIntervalContext, AgentRequest, SuggestionAgent};
 use crate::calendar::{Calendar, CalendarInterval};
 use crate::events::store::EventStore;
 use crate::suggestions::{SuggestionSet, store::SuggestionStore};
 
 const CALENDAR_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const AGENT_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct App {
     event_store: EventStore,
     suggestion_store: SuggestionStore,
+    suggestion_agent: SuggestionAgent,
+    suggestion_job: SuggestionJob,
     selected_date: NaiveDate,
     calendar: Calendar,
     calendar_view: CalendarView,
@@ -51,9 +55,17 @@ enum Action {
     ToggleFocus,
     MoveUp,
     MoveDown,
+    Suggest,
     MouseScrollUp { column: u16, row: u16 },
     MouseScrollDown { column: u16, row: u16 },
     MouseClick { column: u16, row: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum SuggestionJob {
+    Idle,
+    Running { date: NaiveDate },
+    Failed { date: NaiveDate, message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,11 +75,17 @@ enum CalendarView {
 }
 
 impl App {
-    pub fn new(event_store: EventStore, suggestion_store: SuggestionStore) -> Result<Self> {
+    pub fn new(
+        event_store: EventStore,
+        suggestion_store: SuggestionStore,
+        suggestion_agent: SuggestionAgent,
+    ) -> Result<Self> {
         let selected_date = Local::now().date_naive();
         let mut app = Self {
             event_store,
             suggestion_store,
+            suggestion_agent,
+            suggestion_job: SuggestionJob::Idle,
             selected_date,
             calendar: Calendar::new(selected_date, &[], &SuggestionSet::new(vec![], vec![])),
             calendar_view: CalendarView::FiveMinuteIntervals,
@@ -87,14 +105,18 @@ impl App {
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.should_quit {
+            self.finish_suggestion_job()?;
             terminal.draw(|frame| frame.render_widget(&mut *self, frame.area()))?;
 
             let today = Local::now().date_naive();
-            let wait_duration = if self.selected_date == today {
+            let mut wait_duration = if self.selected_date == today {
                 self.refresh_at.saturating_duration_since(Instant::now())
             } else {
                 CALENDAR_REFRESH_INTERVAL
             };
+            if self.suggestion_agent.is_running() {
+                wait_duration = wait_duration.min(AGENT_RESULT_POLL_INTERVAL);
+            }
 
             if let Some(action) = wait_for_action(wait_duration)? {
                 self.handle_action(action)?;
@@ -148,6 +170,7 @@ impl App {
             }
             Action::MoveUp => self.move_up(),
             Action::MoveDown => self.move_down(),
+            Action::Suggest => self.start_suggestion_job()?,
             Action::MouseScrollUp { column, row } => {
                 if self.focus_at(column, row) {
                     self.move_up();
@@ -165,43 +188,81 @@ impl App {
     }
 
     fn refresh_calendar(&mut self) -> Result<()> {
-        let next_date = self
-            .selected_date
-            .succ_opt()
-            .context("calendar date has no representable following day")?;
+        let (start, end) = local_date_bounds(self.selected_date)?;
 
-        let start = Local
-            .from_local_datetime(
-                &self
-                    .selected_date
-                    .and_hms_opt(0, 0, 0)
-                    .expect("midnight is valid"),
-            )
-            .single()
-            .with_context(|| {
-                format!(
-                    "cannot build the calendar for {}: local midnight is missing or ambiguous",
-                    self.selected_date
-                )
-            })?;
-
-        let end = Local
-            .from_local_datetime(&next_date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
-            .single()
-            .with_context(|| {
-                format!(
-                    "cannot build the calendar for {}: local midnight for the following date {next_date} is missing or ambiguous",
-                    self.selected_date
-                )
-            })?;
-
-        let events = self.event_store.events_between(start.into(), end.into())?;
-        let suggestions = self
-            .suggestion_store
-            .suggestions_between(start.into(), end.into())?;
+        let events = self.event_store.events_between(start, end)?;
+        let suggestions = self.suggestion_store.suggestions_between(start, end)?;
         self.calendar = Calendar::new(self.selected_date, &events, &suggestions);
         self.clamp_navigation();
         self.refresh_at = Instant::now() + CALENDAR_REFRESH_INTERVAL;
+
+        Ok(())
+    }
+
+    fn start_suggestion_job(&mut self) -> Result<()> {
+        if self.suggestion_agent.is_running() {
+            return Ok(());
+        }
+
+        self.refresh_calendar()?;
+        let (range_start, range_finish) = local_date_bounds(self.selected_date)?;
+        let five_minute_intervals = self
+            .calendar
+            .five_minute_intervals
+            .iter()
+            .map(agent_interval)
+            .collect();
+        let fifteen_minute_intervals = self
+            .calendar
+            .fifteen_minute_intervals
+            .iter()
+            .map(agent_interval)
+            .collect();
+        let request = AgentRequest::new(
+            self.selected_date,
+            range_start,
+            range_finish,
+            five_minute_intervals,
+            fifteen_minute_intervals,
+        );
+
+        self.suggestion_agent.start(request)?;
+        self.suggestion_job = SuggestionJob::Running {
+            date: self.selected_date,
+        };
+
+        Ok(())
+    }
+
+    fn finish_suggestion_job(&mut self) -> Result<()> {
+        let Some(result) = self.suggestion_agent.try_finish() else {
+            return Ok(());
+        };
+
+        match result {
+            Ok(result) => {
+                self.suggestion_store.replace_between(
+                    result.range_start,
+                    result.range_finish,
+                    &result.suggestions,
+                )?;
+                self.suggestion_job = SuggestionJob::Idle;
+
+                if result.date == self.selected_date {
+                    self.refresh_calendar()?;
+                }
+            }
+            Err(error) => {
+                let date = match self.suggestion_job {
+                    SuggestionJob::Running { date } => date,
+                    _ => self.selected_date,
+                };
+                self.suggestion_job = SuggestionJob::Failed {
+                    date,
+                    message: format!("{error:#}"),
+                };
+            }
+        }
 
         Ok(())
     }
@@ -387,9 +448,17 @@ impl Widget for &mut App {
                 &self.calendar.fifteen_minute_intervals[..],
             ),
         };
+        let suggestion_status = match &self.suggestion_job {
+            SuggestionJob::Running { date } if *date == self.calendar.date => {
+                interval::SuggestionStatus::Running
+            }
+            SuggestionJob::Failed { date, message } if *date == self.calendar.date => {
+                interval::SuggestionStatus::Failed(message)
+            }
+            _ => interval::SuggestionStatus::Idle,
+        };
         let panes = interval::render(
-            title,
-            intervals,
+            interval::IntervalView::new(title, intervals, suggestion_status),
             &mut self.interval_list_state,
             self.interval_context_offset,
             self.focus,
@@ -399,7 +468,7 @@ impl Widget for &mut App {
         self.interval_pane_area = panes.intervals;
         self.details_pane_area = panes.details;
 
-        let footer = if area.width >= 76 {
+        let footer = if area.width >= 80 {
             Line::from(vec![
                 key("Tab"),
                 hint(": focus  "),
@@ -411,6 +480,8 @@ impl Widget for &mut App {
                 hint(": day  "),
                 key("Space"),
                 hint(": today  "),
+                key("S"),
+                hint(": suggest  "),
                 key("Esc"),
                 hint(": quit"),
             ])
@@ -424,6 +495,8 @@ impl Widget for &mut App {
                 hint(" view  "),
                 key("←/→"),
                 hint(" day  "),
+                key("S"),
+                hint(" suggest  "),
                 key("Esc"),
                 hint(" quit"),
             ])
@@ -450,6 +523,46 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
+fn local_date_bounds(date: NaiveDate) -> Result<(SystemTime, SystemTime)> {
+    let next_date = date
+        .succ_opt()
+        .context("calendar date has no representable following day")?;
+    let start = Local
+        .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+        .single()
+        .with_context(|| {
+            format!("cannot build the calendar for {date}: local midnight is missing or ambiguous")
+        })?;
+    let end = Local
+        .from_local_datetime(&next_date.and_hms_opt(0, 0, 0).expect("midnight is valid"))
+        .single()
+        .with_context(|| {
+            format!(
+                "cannot build the calendar for {date}: local midnight for the following date {next_date} is missing or ambiguous"
+            )
+        })?;
+
+    Ok((start.into(), end.into()))
+}
+
+fn agent_interval(interval: &CalendarInterval) -> AgentInterval {
+    AgentInterval::new(
+        interval.start,
+        interval.finish,
+        interval
+            .contexts
+            .iter()
+            .map(|context| {
+                AgentIntervalContext::new(
+                    context.duration,
+                    context.executable.clone(),
+                    context.description.clone(),
+                )
+            })
+            .collect(),
+    )
+}
+
 fn wait_for_action(timeout: Duration) -> io::Result<Option<Action>> {
     if !event::poll(timeout)? {
         return Ok(None);
@@ -466,6 +579,7 @@ fn action_for_event(event: Event) -> Option<Action> {
             KeyCode::Right => Some(Action::NextDay),
             KeyCode::Char(' ') => Some(Action::Today),
             KeyCode::Char('v' | 'V') => Some(Action::ToggleView),
+            KeyCode::Char('s' | 'S') => Some(Action::Suggest),
             KeyCode::Tab => Some(Action::ToggleFocus),
             KeyCode::Up => Some(Action::MoveUp),
             KeyCode::Down => Some(Action::MoveDown),
@@ -503,7 +617,8 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::widgets::{ListState, Widget};
 
-    use super::{Action, App, CalendarView, Focus, action_for_event};
+    use super::{Action, App, CalendarView, Focus, SuggestionJob, action_for_event};
+    use crate::agents::SuggestionAgent;
     use crate::calendar::{Calendar, CalendarInterval, CalendarIntervalContext};
     use crate::events::Event as ActivityEvent;
     use crate::events::store::EventStore;
@@ -586,6 +701,8 @@ mod tests {
         assert_eq!(key_action(KeyCode::Char(' ')), Some(Action::Today));
         assert_eq!(key_action(KeyCode::Char('v')), Some(Action::ToggleView));
         assert_eq!(key_action(KeyCode::Char('V')), Some(Action::ToggleView));
+        assert_eq!(key_action(KeyCode::Char('s')), Some(Action::Suggest));
+        assert_eq!(key_action(KeyCode::Char('S')), Some(Action::Suggest));
         assert_eq!(key_action(KeyCode::Tab), Some(Action::ToggleFocus));
         assert_eq!(key_action(KeyCode::Up), Some(Action::MoveUp));
         assert_eq!(key_action(KeyCode::Down), Some(Action::MoveDown));
@@ -865,6 +982,8 @@ mod tests {
         App {
             event_store: store,
             suggestion_store,
+            suggestion_agent: SuggestionAgent::new(),
+            suggestion_job: SuggestionJob::Idle,
             selected_date: date,
             calendar: Calendar {
                 date,

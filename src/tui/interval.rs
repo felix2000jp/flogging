@@ -25,9 +25,35 @@ pub(super) struct PaneAreas {
     pub(super) details: Rect,
 }
 
+pub(super) struct IntervalView<'a> {
+    title: &'a str,
+    intervals: &'a [CalendarInterval],
+    suggestion_status: SuggestionStatus<'a>,
+}
+
+impl<'a> IntervalView<'a> {
+    pub(super) fn new(
+        title: &'a str,
+        intervals: &'a [CalendarInterval],
+        suggestion_status: SuggestionStatus<'a>,
+    ) -> Self {
+        Self {
+            title,
+            intervals,
+            suggestion_status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SuggestionStatus<'a> {
+    Idle,
+    Running,
+    Failed(&'a str),
+}
+
 pub(super) fn render(
-    title: &str,
-    intervals: &[CalendarInterval],
+    view: IntervalView<'_>,
     state: &mut ListState,
     context_offset: usize,
     focus: Focus,
@@ -39,12 +65,20 @@ pub(super) fn render(
             .spacing(1)
             .areas(area);
 
-    render_intervals(title, intervals, state, focus, intervals_area, buffer);
+    render_intervals(
+        view.title,
+        view.intervals,
+        state,
+        focus,
+        intervals_area,
+        buffer,
+    );
     render_details(
-        intervals,
+        view.intervals,
         state.selected(),
         context_offset,
         focus,
+        view.suggestion_status,
         details_area,
         buffer,
     );
@@ -109,6 +143,7 @@ fn render_details(
     selected: Option<usize>,
     context_offset: usize,
     focus: Focus,
+    suggestion_status: SuggestionStatus<'_>,
     area: Rect,
     buffer: &mut Buffer,
 ) {
@@ -130,20 +165,28 @@ fn render_details(
     );
     let mut block = pane_block(&title, focus == Focus::Details);
     let inner_area = block.inner(area);
+    let suggestion_height = u16::from(inner_area.height > 1);
+    let [_suggestion_top_padding, suggestion_area, table_area] = Layout::vertical([
+        Constraint::Length(suggestion_height),
+        Constraint::Length(suggestion_height),
+        Constraint::Min(0),
+    ])
+    .areas(inner_area);
 
     if interval.contexts.is_empty() {
+        Widget::render(block, area, buffer);
+        render_suggestion(interval, suggestion_status, suggestion_area, buffer);
         Paragraph::new("No observed contexts in this interval.")
             .alignment(Alignment::Center)
             .style(Style::new().fg(theme::SECONDARY_TEXT))
-            .block(block)
-            .render(area, buffer);
+            .render(table_area, buffer);
         return;
     }
 
     let context_offset = context_offset.min(interval.contexts.len() - 1);
-    let header_spacing = u16::from(inner_area.height >= 5);
+    let header_spacing = u16::from(table_area.height >= 5);
     let header_height = 1 + header_spacing * 2;
-    let visible_context_count = usize::from(inner_area.height.saturating_sub(header_height));
+    let visible_context_count = usize::from(table_area.height.saturating_sub(header_height));
     let visible_context_finish =
         (context_offset + visible_context_count).min(interval.contexts.len());
     block = block.title(
@@ -156,6 +199,8 @@ fn render_details(
         .alignment(Alignment::Right)
         .style(Style::new().fg(theme::DIM_TEXT)),
     );
+    Widget::render(block, area, buffer);
+    render_suggestion(interval, suggestion_status, suggestion_area, buffer);
 
     let rows = interval
         .contexts
@@ -187,10 +232,69 @@ fn render_details(
         ],
     )
     .header(header)
-    .column_spacing(2)
-    .block(block);
+    .column_spacing(2);
 
-    Widget::render(table, area, buffer);
+    Widget::render(table, table_area, buffer);
+}
+
+fn render_suggestion(
+    interval: &CalendarInterval,
+    suggestion_status: SuggestionStatus<'_>,
+    area: Rect,
+    buffer: &mut Buffer,
+) {
+    if area.is_empty() {
+        return;
+    }
+
+    let mut spans = vec![Span::styled(
+        "Task suggestion  ",
+        Style::new().fg(theme::FOCUS).add_modifier(Modifier::BOLD),
+    )];
+
+    match suggestion_status {
+        SuggestionStatus::Running => {
+            spans.push(Span::styled(
+                "Calculating suggestions…",
+                Style::new().fg(theme::INFO),
+            ));
+        }
+        SuggestionStatus::Failed(message) => {
+            spans.push(Span::styled("Error", Style::new().fg(theme::ERROR)));
+            spans.push(Span::styled(
+                format!(" · {message} · Press S to retry"),
+                Style::new().fg(theme::DIM_TEXT),
+            ));
+        }
+        SuggestionStatus::Idle => match &interval.suggestion {
+            Some(suggestion) => {
+                let generated_at: DateTime<Local> = suggestion.generated_at.into();
+                if let Some(jira_issue_key) = &suggestion.jira_issue_key {
+                    spans.push(Span::styled(
+                        jira_issue_key.clone(),
+                        Style::new().fg(theme::SUCCESS).add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        "No matching Jira task",
+                        Style::new().fg(theme::WARNING),
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!(" · generated {}", generated_at.format("%H:%M")),
+                    Style::new().fg(theme::DIM_TEXT),
+                ));
+            }
+            None => {
+                spans.push(Span::styled(
+                    "Not generated · Press S",
+                    Style::new().fg(theme::DIM_TEXT),
+                ));
+            }
+        },
+    }
+
+    Paragraph::new(Line::from(spans)).render(area, buffer);
 }
 
 fn pane_block(title: &str, focused: bool) -> Block<'static> {
@@ -310,8 +414,9 @@ mod tests {
     use ratatui::text::Line;
     use ratatui::widgets::ListState;
 
-    use super::{color_for_executable, render, timeline_spans};
+    use super::{IntervalView, SuggestionStatus, color_for_executable, render, timeline_spans};
     use crate::calendar::{CalendarInterval, CalendarIntervalContext};
+    use crate::suggestions::Suggestion;
     use crate::tui::{Focus, theme};
 
     #[test]
@@ -374,8 +479,7 @@ mod tests {
         let mut state = ListState::default().with_selected(Some(0));
 
         let panes = render(
-            "5-minute intervals",
-            &intervals,
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Idle),
             &mut state,
             0,
             Focus::Intervals,
@@ -412,8 +516,7 @@ mod tests {
         let mut state = ListState::default().with_selected(Some(0));
 
         let panes = render(
-            "5-minute intervals",
-            &intervals,
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Idle),
             &mut state,
             0,
             Focus::Intervals,
@@ -435,13 +538,12 @@ mod tests {
             interval(vec![interval_context(300, "first.exe", "First")]),
             interval(vec![interval_context(300, "second.exe", "Second")]),
         ];
-        let area = Rect::new(0, 0, 80, 14);
+        let area = Rect::new(0, 0, 80, 20);
         let mut buffer = Buffer::empty(area);
         let mut state = ListState::default().with_selected(Some(0));
 
         let panes = render(
-            "5-minute intervals",
-            &intervals,
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Idle),
             &mut state,
             0,
             Focus::Intervals,
@@ -462,13 +564,12 @@ mod tests {
             interval_context(100, "second.exe", "Second"),
             interval_context(100, "third.exe", "Third"),
         ])];
-        let area = Rect::new(0, 0, 80, 14);
+        let area = Rect::new(0, 0, 80, 24);
         let mut buffer = Buffer::empty(area);
         let mut state = ListState::default().with_selected(Some(0));
 
         render(
-            "5-minute intervals",
-            &intervals,
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Idle),
             &mut state,
             1,
             Focus::Details,
@@ -490,25 +591,36 @@ mod tests {
             "idea64.exe",
             "MBFSNL-11923",
         )])];
-        let area = Rect::new(0, 0, 80, 20);
+        let area = Rect::new(0, 0, 80, 30);
         let mut buffer = Buffer::empty(area);
         let mut state = ListState::default().with_selected(Some(0));
 
         let panes = render(
-            "5-minute intervals",
-            &intervals,
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Idle),
             &mut state,
             0,
             Focus::Details,
             area,
             &mut buffer,
         );
-        let top_spacing = rendered_line(&buffer, panes.details.y + 1);
-        let header = rendered_line(&buffer, panes.details.y + 2);
-        let bottom_spacing = rendered_line(&buffer, panes.details.y + 3);
-        let first_context = rendered_line(&buffer, panes.details.y + 4);
+        let detail_lines = (panes.details.y + 1..panes.details.bottom() - 1)
+            .map(|y| rendered_line(&buffer, y))
+            .collect::<Vec<_>>();
+        let header_index = detail_lines
+            .iter()
+            .position(|line| line.contains("Time"))
+            .expect("the details table should render its header");
+        let top_spacing = &detail_lines[header_index - 1];
+        let header = &detail_lines[header_index];
+        let bottom_spacing = &detail_lines[header_index + 1];
+        let first_context = &detail_lines[header_index + 2];
         let header_cell = (panes.details.x..panes.details.right())
-            .map(|x| &buffer[(x, panes.details.y + 2)])
+            .map(|x| {
+                &buffer[(
+                    x,
+                    panes.details.y + 1 + u16::try_from(header_index).unwrap(),
+                )]
+            })
             .find(|cell| cell.symbol() == "T")
             .expect("the details table should render its header");
 
@@ -520,14 +632,162 @@ mod tests {
     }
 
     #[test]
+    fn details_show_the_single_suggestion_surface() {
+        let intervals = vec![interval(vec![interval_context(
+            300,
+            "idea64.exe",
+            "MBFSNL-11923",
+        )])];
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        render(
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Idle),
+            &mut state,
+            0,
+            Focus::Details,
+            area,
+            &mut buffer,
+        );
+        let rendered = rendered_text(&buffer);
+
+        assert!(rendered.contains("Task suggestion"));
+        assert!(rendered.contains("Not generated · Press S"));
+    }
+
+    #[test]
+    fn suggestion_is_spaced_from_the_title_and_close_to_the_table() {
+        let intervals = vec![interval(vec![interval_context(
+            300,
+            "idea64.exe",
+            "MBFSNL-11923",
+        )])];
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        let panes = render(
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Idle),
+            &mut state,
+            0,
+            Focus::Details,
+            area,
+            &mut buffer,
+        );
+        let detail_lines = (panes.details.y + 1..panes.details.bottom() - 1)
+            .map(|y| rendered_line(&buffer, y))
+            .collect::<Vec<_>>();
+        let suggestion_index = detail_lines
+            .iter()
+            .position(|line| line.contains("Task suggestion"))
+            .expect("the details pane should render the suggestion");
+        let header_index = detail_lines
+            .iter()
+            .position(|line| line.contains("Time"))
+            .expect("the details pane should render the table header");
+
+        assert!(
+            detail_lines[suggestion_index - 1]
+                .chars()
+                .all(|character| character == ' ' || character == '│')
+        );
+        assert_eq!(header_index, suggestion_index + 1);
+    }
+
+    #[test]
+    fn details_show_when_suggestions_are_being_calculated() {
+        let intervals = vec![interval(vec![interval_context(
+            300,
+            "idea64.exe",
+            "MBFSNL-11923",
+        )])];
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        render(
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Running),
+            &mut state,
+            0,
+            Focus::Details,
+            area,
+            &mut buffer,
+        );
+
+        assert!(rendered_text(&buffer).contains("Calculating suggestions…"));
+    }
+
+    #[test]
+    fn details_show_a_generated_jira_suggestion() {
+        let mut selected_interval = interval(vec![interval_context(
+            300,
+            "idea64.exe",
+            "Implement feature",
+        )]);
+        selected_interval.suggestion = Some(Suggestion::new(
+            selected_interval.start,
+            selected_interval.finish,
+            UNIX_EPOCH,
+            Some("JIRA-42".to_owned()),
+        ));
+        let intervals = vec![selected_interval];
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        render(
+            IntervalView::new("5-minute intervals", &intervals, SuggestionStatus::Idle),
+            &mut state,
+            0,
+            Focus::Details,
+            area,
+            &mut buffer,
+        );
+        let rendered = rendered_text(&buffer);
+
+        assert!(rendered.contains("Task suggestion"));
+        assert!(rendered.contains("JIRA-42"));
+        assert!(rendered.contains("generated"));
+    }
+
+    #[test]
+    fn details_show_agent_errors_in_the_suggestion_surface() {
+        let intervals = vec![interval(vec![interval_context(
+            300,
+            "idea64.exe",
+            "MBFSNL-11923",
+        )])];
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(0));
+
+        render(
+            IntervalView::new(
+                "5-minute intervals",
+                &intervals,
+                SuggestionStatus::Failed("could not reach Ollama"),
+            ),
+            &mut state,
+            0,
+            Focus::Details,
+            area,
+            &mut buffer,
+        );
+        let rendered = rendered_text(&buffer);
+
+        assert!(rendered.contains("Error · could not reach Ollama"));
+        assert!(rendered.contains("Press S to retry"));
+    }
+
+    #[test]
     fn empty_intervals_render_both_panes_without_a_selection() {
         let area = Rect::new(0, 0, 60, 14);
         let mut buffer = Buffer::empty(area);
         let mut state = ListState::default().with_selected(Some(2));
 
         render(
-            "5-minute intervals",
-            &[],
+            IntervalView::new("5-minute intervals", &[], SuggestionStatus::Idle),
             &mut state,
             0,
             Focus::Intervals,

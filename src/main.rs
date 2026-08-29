@@ -1,3 +1,4 @@
+mod agents;
 mod calendar;
 mod collectors;
 mod events;
@@ -8,7 +9,10 @@ use std::io;
 
 #[cfg(target_os = "windows")]
 use crate::collectors::windows::WindowsCollector;
-use crate::{events::store::EventStore, suggestions::store::SuggestionStore, tui::App};
+use crate::{
+    agents::SuggestionAgent, events::store::EventStore, suggestions::store::SuggestionStore,
+    tui::App,
+};
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::crossterm::execute;
@@ -23,10 +27,17 @@ fn main() -> Result<()> {
     let database_path = executable_directory.join("flogging.db");
     let event_store = EventStore::build(&database_path)?;
     let suggestion_store = SuggestionStore::build(&database_path)?;
-    let mut app = App::new(event_store.clone(), suggestion_store.clone())?;
+    
+    let suggestion_agent = SuggestionAgent::new();
 
     #[cfg(target_os = "windows")]
-    let _collector = WindowsCollector::start(event_store);
+    let _collector = WindowsCollector::start(event_store.clone());
+
+    let mut app = App::new(
+        event_store.clone(),
+        suggestion_store.clone(),
+        suggestion_agent,
+    )?;
 
     ratatui::run(|terminal| {
         let _mouse_capture = MouseCapture::enable().context("could not enable mouse controls")?;

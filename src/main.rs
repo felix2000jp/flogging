@@ -23,7 +23,7 @@ fn main() -> Result<()> {
     let database_path = executable_directory.join("flogging.db");
     let event_store = EventStore::build(&database_path)?;
     let suggestion_store = SuggestionStore::build(&database_path)?;
-    let mut app = App::new(event_store.clone(), suggestion_store)?;
+    let mut app = App::new(event_store.clone(), suggestion_store.clone())?;
 
     #[cfg(target_os = "windows")]
     let _collector = WindowsCollector::start(event_store);

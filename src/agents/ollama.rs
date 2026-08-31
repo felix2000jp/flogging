@@ -254,20 +254,25 @@ fn map_suggestions(
     generated: Vec<GeneratedSuggestion>,
     generated_at: SystemTime,
 ) -> Result<Vec<Suggestion>> {
-    let mut generated = generated
-        .into_iter()
-        .map(|suggestion| (suggestion.interval_key.clone(), suggestion))
-        .collect::<HashMap<_, _>>();
     let expected_keys = (0..intervals.len())
         .map(|index| interval_key(prefix, index))
         .collect::<HashSet<_>>();
+    let mut generated_by_key = HashMap::new();
 
-    if generated.len() != intervals.len()
-        || generated.keys().any(|key| !expected_keys.contains(key))
-    {
-        return Err(anyhow!(
-            "Ollama did not return exactly one suggestion for every {prefix} interval"
-        ));
+    for suggestion in generated {
+        let key = suggestion.interval_key.clone();
+
+        if !expected_keys.contains(&key) {
+            return Err(anyhow!(
+                "Ollama returned unexpected {prefix} interval key {key}"
+            ));
+        }
+
+        if generated_by_key.insert(key.clone(), suggestion).is_some() {
+            return Err(anyhow!(
+                "Ollama returned duplicate {prefix} interval key {key}"
+            ));
+        }
     }
 
     intervals
@@ -275,14 +280,13 @@ fn map_suggestions(
         .enumerate()
         .map(|(index, interval)| {
             let key = interval_key(prefix, index);
-            let suggestion = generated
-                .remove(&key)
-                .with_context(|| format!("Ollama omitted interval {key}"))?;
             Ok(Suggestion::new(
                 interval.start,
                 interval.finish,
                 generated_at,
-                suggestion.jira_issue_key,
+                generated_by_key
+                    .remove(&key)
+                    .and_then(|suggestion| suggestion.jira_issue_key),
             ))
         })
         .collect()
@@ -439,8 +443,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_interval_assignments() {
-        let error = parse_suggestions(
+    fn treats_missing_interval_assignments_as_no_suggestion() {
+        let suggestions = parse_suggestions(
             &request(),
             r#"{
                 "five_minute_suggestions": [],
@@ -449,9 +453,59 @@ mod tests {
                 ]
             }"#,
         )
+        .unwrap();
+
+        assert_eq!(suggestions.five_minute_suggestions.len(), 1);
+        assert!(
+            suggestions.five_minute_suggestions[0]
+                .jira_issue_key
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_interval_assignments() {
+        let error = parse_suggestions(
+            &request(),
+            r#"{
+                "five_minute_suggestions": [
+                    {"interval_key":"5m-0000","jira_issue_key":"MBFS-1234"},
+                    {"interval_key":"5m-0000","jira_issue_key":"MBFS-5678"}
+                ],
+                "fifteen_minute_suggestions": [
+                    {"interval_key":"15m-0000","jira_issue_key":null}
+                ]
+            }"#,
+        )
         .unwrap_err();
 
-        assert!(error.to_string().contains("every 5m interval"));
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate 5m interval key 5m-0000")
+        );
+    }
+
+    #[test]
+    fn rejects_unexpected_interval_assignments() {
+        let error = parse_suggestions(
+            &request(),
+            r#"{
+                "five_minute_suggestions": [
+                    {"interval_key":"5m-9999","jira_issue_key":"MBFS-1234"}
+                ],
+                "fifteen_minute_suggestions": [
+                    {"interval_key":"15m-0000","jira_issue_key":null}
+                ]
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected 5m interval key 5m-9999")
+        );
     }
 
     #[test]

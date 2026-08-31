@@ -3,7 +3,7 @@ mod ollama;
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::NaiveDate;
@@ -35,11 +35,50 @@ impl SuggestionAgent {
 
         let (result_sender, result_receiver) = mpsc::sync_channel(1);
         let (cancellation_sender, cancellation_receiver) = watch::channel(false);
+        let date = request.date;
+        let five_minute_interval_count = request.five_minute_intervals.len();
+        let fifteen_minute_interval_count = request.fifteen_minute_intervals.len();
         let worker = thread::Builder::new()
             .name("suggestion-agent".to_owned())
             .spawn(move || {
+                tracing::info!(
+                    %date,
+                    five_minute_interval_count,
+                    fifteen_minute_interval_count,
+                    "suggestion agent started"
+                );
+                let started_at = Instant::now();
                 let result = ollama::generate_suggestions(request, cancellation_receiver);
-                let _ = result_sender.send(result);
+
+                match &result {
+                    Ok(result) => tracing::info!(
+                        %date,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        five_minute_matches = result
+                            .suggestions
+                            .five_minute_suggestions
+                            .iter()
+                            .filter(|suggestion| suggestion.jira_issue_key.is_some())
+                            .count(),
+                        fifteen_minute_matches = result
+                            .suggestions
+                            .fifteen_minute_suggestions
+                            .iter()
+                            .filter(|suggestion| suggestion.jira_issue_key.is_some())
+                            .count(),
+                        "suggestion agent finished"
+                    ),
+                    Err(error) => tracing::error!(
+                        %date,
+                        elapsed_ms = started_at.elapsed().as_millis(),
+                        error = %format_args!("{error:#}"),
+                        "suggestion agent failed"
+                    ),
+                }
+
+                if result_sender.send(result).is_err() {
+                    tracing::debug!(%date, "suggestion result receiver was dropped");
+                }
             })
             .context("could not start the suggestion agent thread")?;
         self.running_agent = Some(RunningAgent {
@@ -71,7 +110,10 @@ impl SuggestionAgent {
 
         match running_agent.worker.join() {
             Ok(()) => Some(result),
-            Err(_) => Some(Err(anyhow!("suggestion agent thread panicked"))),
+            Err(_) => {
+                tracing::error!("suggestion agent thread panicked");
+                Some(Err(anyhow!("suggestion agent thread panicked")))
+            }
         }
     }
 }
@@ -82,8 +124,11 @@ impl Drop for SuggestionAgent {
             return;
         };
 
+        tracing::info!("cancelling suggestion agent");
         let _ = running_agent.cancellation_sender.send(true);
-        let _ = running_agent.worker.join();
+        if running_agent.worker.join().is_err() {
+            tracing::error!("suggestion agent thread panicked while stopping");
+        }
     }
 }
 

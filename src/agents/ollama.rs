@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Local};
@@ -136,7 +136,15 @@ impl Ollama {
         tools: &[OllamaTool],
         format: Option<Value>,
     ) -> Result<ChatResponse> {
-        self.client
+        let started_at = Instant::now();
+        tracing::debug!(
+            model = %self.model,
+            tool_count = tools.len(),
+            structured_output = format.is_some(),
+            "sending Ollama request"
+        );
+        let response = self
+            .client
             .post(&self.url)
             .timeout(OLLAMA_REQUEST_TIMEOUT)
             .json(&ChatRequest {
@@ -155,7 +163,17 @@ impl Ollama {
             .context("Ollama rejected the suggestion request")?
             .json()
             .await
-            .context("could not decode the Ollama response")
+            .context("could not decode the Ollama response");
+
+        if response.is_ok() {
+            tracing::debug!(
+                model = %self.model,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "Ollama request completed"
+            );
+        }
+
+        response
     }
 }
 
@@ -231,48 +249,117 @@ fn parse_suggestions(request: &AgentRequest, response: &str) -> Result<Suggestio
     let generated: GeneratedSuggestionSet =
         serde_json::from_str(response).context("Ollama returned invalid suggestion JSON")?;
     let generated_at = SystemTime::now();
+    let five_minute_keys = expected_interval_keys("5m", &request.five_minute_intervals);
+    let fifteen_minute_keys = expected_interval_keys("15m", &request.fifteen_minute_intervals);
+    let mut generated_by_key = HashMap::new();
+    let mut misplaced = vec![];
+
+    for suggestion in generated.five_minute_suggestions {
+        if five_minute_keys.contains(&suggestion.interval_key) {
+            insert_suggestion(&mut generated_by_key, suggestion);
+        } else {
+            misplaced.push(("5m", suggestion));
+        }
+    }
+
+    for suggestion in generated.fifteen_minute_suggestions {
+        if fifteen_minute_keys.contains(&suggestion.interval_key) {
+            insert_suggestion(&mut generated_by_key, suggestion);
+        } else {
+            misplaced.push(("15m", suggestion));
+        }
+    }
+
+    for (returned_collection, suggestion) in misplaced {
+        let expected_collection = if five_minute_keys.contains(&suggestion.interval_key) {
+            Some("5m")
+        } else if fifteen_minute_keys.contains(&suggestion.interval_key) {
+            Some("15m")
+        } else {
+            None
+        };
+
+        let Some(expected_collection) = expected_collection else {
+            tracing::warn!(
+                interval_key = %suggestion.interval_key,
+                returned_collection,
+                "Ollama returned an unknown interval key; ignoring it"
+            );
+            continue;
+        };
+
+        if generated_by_key.contains_key(&suggestion.interval_key) {
+            tracing::warn!(
+                interval_key = %suggestion.interval_key,
+                returned_collection,
+                expected_collection,
+                "Ollama returned a misplaced duplicate interval key; ignoring it"
+            );
+            continue;
+        }
+
+        tracing::warn!(
+            interval_key = %suggestion.interval_key,
+            returned_collection,
+            expected_collection,
+            "Ollama returned a suggestion in the wrong interval collection; recovering it"
+        );
+        insert_suggestion(&mut generated_by_key, suggestion);
+    }
 
     Ok(SuggestionSet::new(
         map_suggestions(
             "5m",
             &request.five_minute_intervals,
-            generated.five_minute_suggestions,
+            &mut generated_by_key,
             generated_at,
-        )?,
+        ),
         map_suggestions(
             "15m",
             &request.fifteen_minute_intervals,
-            generated.fifteen_minute_suggestions,
+            &mut generated_by_key,
             generated_at,
-        )?,
+        ),
     ))
+}
+
+fn expected_interval_keys(prefix: &str, intervals: &[AgentInterval]) -> HashSet<String> {
+    (0..intervals.len())
+        .map(|index| interval_key(prefix, index))
+        .collect()
+}
+
+fn insert_suggestion(
+    generated_by_key: &mut HashMap<String, GeneratedSuggestion>,
+    suggestion: GeneratedSuggestion,
+) {
+    let key = suggestion.interval_key.clone();
+
+    if generated_by_key.insert(key.clone(), suggestion).is_some() {
+        tracing::warn!(interval_key = %key, "Ollama returned a duplicate interval key; using the last suggestion");
+    }
 }
 
 fn map_suggestions(
     prefix: &str,
     intervals: &[AgentInterval],
-    generated: Vec<GeneratedSuggestion>,
+    generated_by_key: &mut HashMap<String, GeneratedSuggestion>,
     generated_at: SystemTime,
-) -> Result<Vec<Suggestion>> {
-    let expected_keys = (0..intervals.len())
-        .map(|index| interval_key(prefix, index))
-        .collect::<HashSet<_>>();
-    let mut generated_by_key = HashMap::new();
-
-    for suggestion in generated {
-        let key = suggestion.interval_key.clone();
-
-        if !expected_keys.contains(&key) {
-            return Err(anyhow!(
-                "Ollama returned unexpected {prefix} interval key {key}"
-            ));
-        }
-
-        if generated_by_key.insert(key.clone(), suggestion).is_some() {
-            return Err(anyhow!(
-                "Ollama returned duplicate {prefix} interval key {key}"
-            ));
-        }
+) -> Vec<Suggestion> {
+    let returned_count = intervals
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| generated_by_key.contains_key(&interval_key(prefix, *index)))
+        .count();
+    let missing_count = intervals.len() - returned_count;
+    if missing_count > 0 {
+        tracing::warn!(
+            interval_kind = prefix,
+            expected_count = intervals.len(),
+            returned_count,
+            missing_count,
+            "Ollama omitted interval suggestions; treating them as no suggestion"
+        );
     }
 
     intervals
@@ -280,14 +367,14 @@ fn map_suggestions(
         .enumerate()
         .map(|(index, interval)| {
             let key = interval_key(prefix, index);
-            Ok(Suggestion::new(
+            Suggestion::new(
                 interval.start,
                 interval.finish,
                 generated_at,
                 generated_by_key
                     .remove(&key)
                     .and_then(|suggestion| suggestion.jira_issue_key),
-            ))
+            )
         })
         .collect()
 }
@@ -464,8 +551,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_interval_assignments() {
-        let error = parse_suggestions(
+    fn uses_the_last_duplicate_interval_assignment() {
+        let suggestions = parse_suggestions(
             &request(),
             r#"{
                 "five_minute_suggestions": [
@@ -477,18 +564,19 @@ mod tests {
                 ]
             }"#,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("duplicate 5m interval key 5m-0000")
+        assert_eq!(
+            suggestions.five_minute_suggestions[0]
+                .jira_issue_key
+                .as_deref(),
+            Some("MBFS-5678")
         );
     }
 
     #[test]
-    fn rejects_unexpected_interval_assignments() {
-        let error = parse_suggestions(
+    fn ignores_unknown_interval_assignments() {
+        let suggestions = parse_suggestions(
             &request(),
             r#"{
                 "five_minute_suggestions": [
@@ -499,12 +587,34 @@ mod tests {
                 ]
             }"#,
         )
-        .unwrap_err();
+        .unwrap();
 
         assert!(
-            error
-                .to_string()
-                .contains("unexpected 5m interval key 5m-9999")
+            suggestions.five_minute_suggestions[0]
+                .jira_issue_key
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn recovers_an_interval_assignment_from_the_wrong_collection() {
+        let suggestions = parse_suggestions(
+            &request(),
+            r#"{
+                "five_minute_suggestions": [],
+                "fifteen_minute_suggestions": [
+                    {"interval_key":"5m-0000","jira_issue_key":"MBFS-1234"},
+                    {"interval_key":"15m-0000","jira_issue_key":null}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            suggestions.five_minute_suggestions[0]
+                .jira_issue_key
+                .as_deref(),
+            Some("MBFS-1234")
         );
     }
 

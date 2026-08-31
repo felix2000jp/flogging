@@ -26,8 +26,10 @@ pub struct WindowsCollector {
 impl WindowsCollector {
     pub fn start(store: EventStore) -> Self {
         let (stop_sender, stop_receiver) = mpsc::channel();
-        let worker =
-            thread::spawn(move || poll_and_store_foreground_window_events(store, stop_receiver));
+        let worker = thread::Builder::new()
+            .name("foreground-window-collector".to_owned())
+            .spawn(move || poll_and_store_foreground_window_events(store, stop_receiver))
+            .expect("the foreground-window collector thread should start");
 
         Self {
             stop_sender,
@@ -43,16 +45,23 @@ impl Drop for WindowsCollector {
         };
 
         let _ = self.stop_sender.send(());
-        let _ = worker.join();
+        if worker.join().is_err() {
+            tracing::error!("foreground-window collector thread panicked");
+        }
     }
 }
 
 fn poll_and_store_foreground_window_events(store: EventStore, stop_receiver: Receiver<()>) {
+    tracing::info!("foreground-window collector started");
+
     loop {
         if let Some(event) = collect_foreground_window_event()
             && let Err(error) = store.save(&event)
         {
-            eprintln!("Could not save foreground-window event: {error:#}");
+            tracing::error!(
+                error = %format_args!("{error:#}"),
+                "could not save foreground-window event"
+            );
         }
 
         match stop_receiver.recv_timeout(Duration::from_secs(1)) {
@@ -60,6 +69,8 @@ fn poll_and_store_foreground_window_events(store: EventStore, stop_receiver: Rec
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
+
+    tracing::info!("foreground-window collector stopped");
 }
 
 fn collect_foreground_window_event() -> Option<Event> {

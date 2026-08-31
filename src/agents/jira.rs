@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use rmcp::ServiceExt;
@@ -8,6 +8,7 @@ use rmcp::model::{CallToolRequestParams, CallToolResult, JsonObject, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::TokioChildProcess;
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 const DEFAULT_MCP_URL: &str = "https://mcp.atlassian.com/v1/mcp/authv2";
 const MCP_REMOTE_PACKAGE: &str = "mcp-remote@0.8.2";
@@ -36,10 +37,30 @@ impl Jira {
         command.arg("-y").arg(MCP_REMOTE_PACKAGE).arg(mcp_url);
         command.kill_on_drop(true);
 
-        let (transport, _) = TokioChildProcess::builder(command)
-            .stderr(Stdio::null())
+        tracing::info!(package = MCP_REMOTE_PACKAGE, "connecting to Jira MCP");
+
+        let (transport, stderr) = TokioChildProcess::builder(command)
+            .stderr(Stdio::piped())
             .spawn()
             .context("could not start the Atlassian MCP client; npx must be installed")?;
+        if let Some(stderr) = stderr {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(line)) => {
+                            tracing::debug!(message = %line, "Jira MCP process output");
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            tracing::warn!(%error, "could not read Jira MCP process output");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
         let service = ()
             .serve(transport)
             .await
@@ -59,6 +80,8 @@ impl Jira {
         }
 
         let allowed_tool_names = tools.iter().map(|tool| tool.name.to_string()).collect();
+
+        tracing::info!(supported_tool_count = tools.len(), "connected to Jira MCP");
 
         Ok(Self {
             service,
@@ -95,17 +118,30 @@ impl Jira {
             .as_object()
             .cloned()
             .context("Jira tool arguments must be a JSON object")?;
-        tokio::time::timeout(
+        let started_at = Instant::now();
+        tracing::debug!(tool = %name, "calling Jira MCP tool");
+        let result = tokio::time::timeout(
             TOOL_CALL_TIMEOUT,
             self.service
-                .call_tool(CallToolRequestParams::new(name).with_arguments(arguments)),
+                .call_tool(CallToolRequestParams::new(name.clone()).with_arguments(arguments)),
         )
         .await
-        .context("Jira MCP tool call timed out")?
-        .context("Jira MCP tool call failed")
+        .with_context(|| format!("Jira MCP tool {name} timed out"))?
+        .with_context(|| format!("Jira MCP tool {name} failed"));
+
+        if result.is_ok() {
+            tracing::debug!(
+                tool = %name,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "Jira MCP tool completed"
+            );
+        }
+
+        result
     }
 
     pub(super) async fn shutdown(self) -> Result<()> {
+        tracing::debug!("stopping Jira MCP client");
         self.service
             .cancel()
             .await

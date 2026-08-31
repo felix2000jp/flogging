@@ -192,6 +192,13 @@ impl App {
 
         let events = self.event_store.events_between(start, end)?;
         let suggestions = self.suggestion_store.suggestions_between(start, end)?;
+        tracing::debug!(
+            date = %self.selected_date,
+            event_count = events.len(),
+            five_minute_suggestion_count = suggestions.five_minute_suggestions.len(),
+            fifteen_minute_suggestion_count = suggestions.fifteen_minute_suggestions.len(),
+            "refreshing calendar"
+        );
         self.calendar = Calendar::new(self.selected_date, &events, &suggestions);
         self.clamp_navigation();
         self.refresh_at = Instant::now() + CALENDAR_REFRESH_INTERVAL;
@@ -246,12 +253,18 @@ impl App {
                     result.range_finish,
                     &result.suggestions,
                 ) {
+                    tracing::error!(
+                        date = %result.date,
+                        error = %format_args!("{error:#}"),
+                        "could not save suggestions"
+                    );
                     self.suggestion_job = SuggestionJob::Failed {
                         date: result.date,
                         message: format!("Could not save suggestions: {error:#}"),
                     };
                     return Ok(());
                 }
+                tracing::info!(date = %result.date, "saved suggestion result");
                 self.suggestion_job = SuggestionJob::Idle;
 
                 if result.date == self.selected_date {
@@ -263,6 +276,11 @@ impl App {
                     SuggestionJob::Running { date } => date,
                     _ => self.selected_date,
                 };
+                tracing::error!(
+                    %date,
+                    error = %format_args!("{error:#}"),
+                    "suggestion job failed"
+                );
                 self.suggestion_job = SuggestionJob::Failed {
                     date,
                     message: format!("{error:#}"),
